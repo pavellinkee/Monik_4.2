@@ -70,13 +70,32 @@ class TestScope:
         assert ann.raw_amounts == (50_000_000, 100_000_000)
         assert len(ur.raw_amounts) == 1, "ur по-прежнему ищет одной суммой"
 
-    def test_ann_takes_only_stable_tokens(self, database: Database, clock: FakeClock) -> None:
+    def test_ann_takes_every_enabled_token(self, database: Database, clock: FakeClock) -> None:
+        """Торговый проход не ограничен стейблкоинами (правило 15).
+
+        Состав задаёт конфигурация: включён токен — режим его берёт.
+        Метка ``usd_stable`` отбор ``ann`` не сужает, иначе волатильный
+        токен, который оператор включил намеренно, остался бы невидимым.
+        """
         harness = _harness(_stable_document(), database, clock)
 
         scope = harness.scanner.scopes(ScanMode.ANN)[0]
         symbols = {harness.tokens.require(key).symbol for key in scope.tokens}
 
-        assert symbols == {"AAVE"}, "WETH не помечен usd_stable и в торговый проход не входит"
+        assert symbols == {"AAVE", "WETH"}, "включённый волатильный токен входит в проход"
+
+    def test_fest_still_takes_only_stable_tokens(
+        self, database: Database, clock: FakeClock
+    ) -> None:
+        """Правило 15 меняет только ``ann``: отбор ``fest`` прежний."""
+        document = _stable_document()
+        document["scanner"]["modes"]["fest"] = {"enabled": True, "interval_seconds": 30}
+        harness = _harness(document, database, clock)
+
+        scope = harness.scanner.scopes(ScanMode.FEST)[0]
+        symbols = {harness.tokens.require(key).symbol for key in scope.tokens}
+
+        assert symbols == {"AAVE"}, "WETH не помечен usd_stable и в частый проход не входит"
 
     def test_declared_but_switched_off_network_is_not_scanned(
         self, database: Database, clock: FakeClock
@@ -118,7 +137,12 @@ class TestScope:
         document["profitability"] = {"thresholds": {"ur": "-100", "fest": "-100", "ann": "-100"}}
         harness = _harness(document, database, clock)
 
-        assert harness.scanner.scopes(ScanMode.ANN) == ()
+        # Проверяется именно сеть: Arbitrum выключен в networks, и
+        # разрешение режима его не воскрешает. Раньше здесь ожидался
+        # пустой список сцен — но пустым он был из-за отбора по
+        # ``usd_stable``, а не из-за сети, и после правила 15 такая
+        # проверка перестала бы говорить о сетях вовсе.
+        assert [scope.networks for scope in harness.scanner.scopes(ScanMode.ANN)] == [(POLYGON,)]
 
 
 class TestSelection:

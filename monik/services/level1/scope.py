@@ -97,9 +97,15 @@ class ScopeBuilder:
         логика. ``ur`` берёт весь набор, ``fest`` — только помеченные
         ``usd_stable``, поэтому новый стабильный токен попадает в частый
         проход, как только получит метку, без правки списков.
+
+        ``ann`` берёт весь включённый набор (``the_main_rules.md``,
+        правило 15). Метка ``usd_stable`` его состав не ограничивает:
+        расхождение цен между стейблкоинами меньше стоимости круга, и
+        торговый проход, запертый в них, не может взять никакого порога.
+        Чем торговать, решает включённость токена в конфигурации.
         """
         tokens = self.scan_tokens(network_id)
-        if mode in (ScanMode.FEST, ScanMode.ANN):
+        if mode is ScanMode.FEST:
             return tuple(token for token in tokens if token.usd_stable)
         return tokens
 
