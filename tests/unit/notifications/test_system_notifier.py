@@ -628,3 +628,45 @@ class TestDeliveryLogging:
 
         text = transport.sent[0].text
         assert all(text not in message for message in log.messages)
+
+
+class TestReadableAmounts:
+    """Суммы пишутся так, как их читает человек.
+
+    ``Decimal.normalize`` убирает хвостовые нули, но круглое число
+    превращает в показательную запись: 50 становится ``5E+1``. Оператору
+    такая строка ничего не говорит, и валюта в ней тоже нужна.
+    """
+
+    async def test_amounts_are_plain_numbers_with_the_currency(self) -> None:
+        transport = FakeTransport()
+        summary = _summary(
+            modes=(
+                ModeSummary(
+                    name="ann",
+                    networks=("polygon",),
+                    providers=("uniswap",),
+                    tokens=("USDC",),
+                    base_token="USDT",
+                    amounts=("50", "100"),
+                ),
+            )
+        )
+        await _notifier(transport, FakeClock(f.NOW)).notify_startup(summary)
+
+        text = transport.sent[0].text
+        assert "Суммы: 50, 100 USDT" in text
+        assert "E+" not in text
+
+
+def test_round_amounts_never_become_scientific_notation() -> None:
+    """Проверка у источника: строку строит приложение, а не сообщение."""
+    from decimal import Decimal
+
+    from monik.app.lifecycle import _plain_amount
+
+    assert _plain_amount(Decimal("50")) == "50"
+    assert _plain_amount(Decimal("100")) == "100"
+    assert _plain_amount(Decimal("1000")) == "1000"
+    assert _plain_amount(Decimal("50.000")) == "50"
+    assert _plain_amount(Decimal("0.005")) == "0.005"

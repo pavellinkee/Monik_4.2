@@ -235,7 +235,8 @@ def _mode_lines(summary: StartupSummary) -> list[str]:
                 else f"  Токены: {circle}"
             )
         if mode.amounts:
-            lines.append(f"  Суммы: {', '.join(mode.amounts)}")
+            unit = f" {mode.base_token}" if mode.base_token else ""
+            lines.append(f"  Суммы: {', '.join(mode.amounts)}{unit}")
         pace: list[str] = []
         if mode.interval_seconds is not None:
             pace.append(f"проход раз в {mode.interval_seconds} с")

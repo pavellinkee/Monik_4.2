@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
+from decimal import Decimal
 
 from monik import APPLICATION_VERSION
 from monik.app.container import Container, build_container
@@ -79,6 +80,16 @@ _LOGGER = get_logger("app.lifecycle")
 
 #: Идентификаторы задач планировщика.
 #: Идентификатор задачи режима: по одной задаче на режим.
+def _plain_amount(value: Decimal) -> str:
+    """Сумма в привычной записи, без хвостовых нулей и без степеней.
+
+    ``normalize`` убирает хвостовые нули, но круглые числа превращает в
+    показательную запись: 50 становится ``5E+1``. Оператору такая строка
+    ничего не говорит, поэтому запись задаётся явно.
+    """
+    return format(value.normalize(), "f")
+
+
 def scan_task_name(mode: ScanMode) -> str:
     """Имя задачи расписания для режима."""
     return f"scan_{mode.value}"
@@ -330,7 +341,7 @@ class Application:
                     base = tokens.base_token(network)
                     bases.append(str(base.symbol))
                     amounts.extend(
-                        str(base.amount_from_base_units(raw).as_decimal.normalize())
+                        _plain_amount(base.amount_from_base_units(raw).as_decimal)
                         for raw in scope.raw_amounts
                     )
             summaries.append(
