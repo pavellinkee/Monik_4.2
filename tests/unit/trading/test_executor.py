@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
+import pytest
 from eth_account import Account
 
 from monik.config import parse_configuration
@@ -771,26 +772,14 @@ class TestFailureWording:
     чего там никогда не было. Наблюдено на сделке #T4 19.09.
     """
 
-    async def test_an_unfilled_order_is_not_called_a_revert(self) -> None:
-        # Обработчик вешается на сам журнал исполнителя, а не на корень:
-        # приложение отключает всплытие записей, и запись до корневого
-        # обработчика не доходит. Тест не должен зависеть от того, в
-        # каком порядке с ним отработали другие.
-        records: list[logging.LogRecord] = []
+    async def test_an_unfilled_order_is_not_called_a_revert(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, _ = _order_executor(node, positions, outcome=OrderOutcome.EXPIRED)
 
-        class _Collect(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                records.append(record)
-
-        logger = logging.getLogger("monik.services.trading.executor")
-        handler = _Collect(level=logging.INFO)
-        previous = logger.level
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        try:
-            node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
-            positions = MemoryPositions()
-            executor, _ = _order_executor(node, positions, outcome=OrderOutcome.EXPIRED)
+        with caplog.at_level(logging.INFO, logger="monik.services.trading.executor"):
             await executor.consider(
                 (
                     _result(
@@ -803,11 +792,8 @@ class TestFailureWording:
                     ),
                 )
             )
-        finally:
-            logger.removeHandler(handler)
-            logger.setLevel(previous)
 
-        messages = [record.getMessage() for record in records]
+        messages = [record.getMessage() for record in caplog.records]
         assert "trade closed without a buy: the order was not filled" in messages
         assert "trade failed: the buy transaction reverted" not in messages
 
@@ -855,23 +841,15 @@ class TestNothingSentWording:
     значит послать оператора искать в цепи то, чего там не было.
     """
 
-    async def test_a_trade_that_was_never_sent_says_so(self) -> None:
-        records: list[logging.LogRecord] = []
+    async def test_a_trade_that_was_never_sent_says_so(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, adapter = _order_executor(node, positions)
+        adapter.place_error = DataError("book refused", code="order_rejected")
 
-        class _Collect(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                records.append(record)
-
-        logger = logging.getLogger("monik.services.trading.executor")
-        handler = _Collect(level=logging.INFO)
-        previous = logger.level
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        try:
-            node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
-            positions = MemoryPositions()
-            executor, adapter = _order_executor(node, positions)
-            adapter.place_error = DataError("book refused", code="order_rejected")
+        with caplog.at_level(logging.INFO, logger="monik.services.trading.executor"):
             await executor.consider(
                 (
                     _result(
@@ -884,11 +862,8 @@ class TestNothingSentWording:
                     ),
                 )
             )
-        finally:
-            logger.removeHandler(handler)
-            logger.setLevel(previous)
 
-        messages = [record.getMessage() for record in records]
+        messages = [record.getMessage() for record in caplog.records]
         assert "trade closed without a buy: nothing was ever sent" in messages
         assert "trade failed: the buy transaction reverted" not in messages
         assert "trade closed without a buy: the order was not filled" not in messages
