@@ -156,6 +156,10 @@ class CowAdapter(HttpProviderAdapter):
             # относится: платит его решатель, а с нас удержано в цене.
             supports_gas_estimate=True,
             supports_execution=True,
+            # Исполняет подписанной заявкой, а не транзакцией. Без этого
+            # признака подсистема исполнения пошла бы собирать calldata и
+            # получила бы отказ: форма исполнения выбирается по нему.
+            supports_signed_orders=True,
         )
 
     @property

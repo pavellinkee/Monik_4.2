@@ -20,9 +20,11 @@ from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
 from monik.infrastructure.providers import QuoteRequest
 from monik.infrastructure.providers.cow import CowAdapter, endpoints
+from monik.infrastructure.providers.uniswap import UniswapAdapter
 from monik.services.observability import FakeClock
+from monik.services.trading.orders import executes_with_orders
 from tests import factories as f
-from tests.unit.providers.support import provider_config, resource_manager
+from tests.unit.providers.support import provider_config, resource_manager, secret
 
 SWAPPER = "0x" + "c6" * 20
 
@@ -306,3 +308,32 @@ class TestRefusals:
 
         with pytest.raises(RouteRejectedError):
             await adapter.get_quote(_request())
+
+
+class TestCapabilities:
+    def test_the_adapter_declares_that_it_executes_with_orders(self) -> None:
+        """Признак объявляет сам адаптер, и проверять надо именно его.
+
+        Двойник в тестах исполнения объявляет признак вручную, поэтому
+        забытый флаг у настоящего адаптера теми тестами не ловится: там
+        проверяется путь, здесь — что провайдер на него попадёт.
+        """
+        capabilities = _adapter().capabilities
+
+        assert capabilities.supports_execution is True
+        assert capabilities.supports_signed_orders is True
+        assert executes_with_orders(_adapter()) is True
+
+    def test_transaction_providers_do_not_claim_orders(self) -> None:
+        """Признак — свойство провайдера, а не значение по умолчанию."""
+        clock = FakeClock(f.NOW)
+        uniswap = UniswapAdapter(
+            provider_config(ProviderId.UNISWAP, options={"swapper": SWAPPER}),
+            http=FakeHttpClient([]),
+            resources=resource_manager(clock),
+            clock=clock,
+            api_key=secret(),
+        )
+
+        assert uniswap.capabilities.supports_signed_orders is False
+        assert executes_with_orders(uniswap) is False
