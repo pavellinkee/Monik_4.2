@@ -23,7 +23,13 @@ from decimal import Decimal
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    ExecutionOffer,
+    ExecutionPlan,
+    OrderOutcome,
+    SignedOrderPlan,
+    SwapTransaction,
+)
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.position import Position
 from monik.domain.models.token import Token
@@ -37,6 +43,11 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.registries.tokens import TokenRegistry
 from monik.services.trading.chain import ChainAccount, TransactionReceipt
+from monik.services.trading.orders import (
+    SignedOrderRunner,
+    executes_with_orders,
+    leg_gas_units,
+)
 from monik.services.trading.ports import (
     ExecutionCosts,
     GasCalibrationRecorder,
@@ -85,6 +96,7 @@ class TradeExecutor:
         is_execution_open: Callable[[], bool],
         slippage_bps: int,
         min_entry_profit_raw: int,
+        orders: SignedOrderRunner | None = None,
         max_offer_checks: int = 10,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
@@ -102,6 +114,10 @@ class TradeExecutor:
         self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
         self._min_entry_profit_raw = min_entry_profit_raw
+        #: Исполнение подписанной заявкой. ``None`` означает, что такой
+        #: формы у системы нет: провайдер, исполняющий заявками, тогда
+        #: годится для поиска, но сделку по нему открывать нечем.
+        self._orders = orders
         #: Сколько находок проверять предложением за один проход. Отказ
         #: стоит запросов, и перебирать весь список в цикле, где ни одна
         #: не подтверждается, незачем.
@@ -217,7 +233,7 @@ class TradeExecutor:
         reserved = await self._positions.reserved_raw_input(network_id)
         return max(balance.raw - reserved, 0)
 
-    async def _offer_allows(self, choice: _Choice, buy: SwapTransaction) -> bool:
+    async def _offer_allows(self, choice: _Choice, buy: ExecutionOffer) -> bool:
         """Проверить находку по **реальному предложению**, а не по котировке.
 
         Агрегатор — обменник, а не биржа: он называет цену сам и может
@@ -262,7 +278,7 @@ class TradeExecutor:
         costs_raw = await self._costs.to_base_raw(
             choice.base.network_id,
             choice.base,
-            wei=(buy.gas_limit + sell.gas_limit) * price,
+            wei=(leg_gas_units(buy) + leg_gas_units(sell)) * price,
         )
         if costs_raw is None:
             _LOGGER.info(
@@ -281,7 +297,7 @@ class TradeExecutor:
             "promised_output": str(Decimal(sell.quote.output_amount.raw) / scale),
             "guaranteed_output": str(Decimal(sell.min_output_raw) / scale),
             "guaranteed_target": str(guaranteed_target.as_decimal),
-            "exact_gas_units": buy.gas_limit + sell.gas_limit,
+            "exact_gas_units": leg_gas_units(buy) + leg_gas_units(sell),
             "gas_price_wei": price,
             "gas_cost": str(Decimal(costs_raw) / scale),
             "guaranteed_profit": str(Decimal(profit_raw) / scale),
@@ -295,9 +311,23 @@ class TradeExecutor:
         _LOGGER.info("trade offer verified", extra=fields)
         return True
 
+    async def _build_offer(
+        self, adapter: AggregatorAdapter, request: QuoteRequest
+    ) -> ExecutionPlan:
+        """Спросить у агрегатора его предложение в той форме, в какой он его даёт.
+
+        Одни отдают транзакцию, другой — заявку на подпись
+        (``the_main_rules.md``, правило 16). Решение принимается по
+        обязательству, а оно есть у обеих форм, поэтому вызывающему коду
+        различие не нужно.
+        """
+        if executes_with_orders(adapter):
+            return await adapter.build_order(request)
+        return await adapter.build_swap(request)
+
     async def _build_exit(
         self, choice: _Choice, seller: AggregatorAdapter, amount: TokenAmount
-    ) -> SwapTransaction | None:
+    ) -> ExecutionPlan | None:
         """Собрать ногу продажи на то количество, которое мы получим.
 
         Сумма — не обещание котировки покупки, а её гарантированный
@@ -309,7 +339,8 @@ class TradeExecutor:
         по остатку, и минимум с пределом газа называет.
         """
         try:
-            return await seller.build_swap(
+            return await self._build_offer(
+                seller,
                 QuoteRequest(
                     network_id=choice.base.network_id,
                     operation=OperationType.SELL,
@@ -319,7 +350,7 @@ class TradeExecutor:
                     request_id=RequestId.generate(),
                     slippage_bps=self._slippage_bps,
                     priority=_PRIORITY,
-                )
+                ),
             )
         except Exception as error:  # noqa: BLE001 - отсутствие предложения не сбой
             _LOGGER.info(
@@ -338,7 +369,8 @@ class TradeExecutor:
         adapter = self._adapters.get(candidate.buy_quote.provider_id.value)
         if adapter is None:
             return None
-        transaction = await adapter.build_swap(
+        transaction = await self._build_offer(
+            adapter,
             QuoteRequest(
                 network_id=network_id,
                 operation=OperationType.BUY,
@@ -350,15 +382,24 @@ class TradeExecutor:
                 # Сделка обслуживается раньше поиска
                 # (``the_main_rules.md``, правило 13).
                 priority=RequestPriority.ANN_BUY,
-            )
+            ),
         )
         if not await self._offer_allows(choice, transaction):
             return None
-        simulation = await self._account.simulate(transaction, priority=_PRIORITY)
-        if not simulation.succeeded:
+        if isinstance(transaction, SwapTransaction):
+            simulation = await self._account.simulate(transaction, priority=_PRIORITY)
+            if not simulation.succeeded:
+                _LOGGER.warning(
+                    "trade cancelled: the swap would revert",
+                    extra=self._describe(choice) | {"reason": simulation.revert_reason or ""},
+                )
+                return None
+        elif self._orders is None:
+            # Провайдер исполняет заявками, а подписать их нечем.
+            # Открывать сделку, которую нечем исполнить, нельзя.
             _LOGGER.warning(
-                "trade cancelled: the swap would revert",
-                extra=self._describe(choice) | {"reason": simulation.revert_reason or ""},
+                "trade cancelled: signed orders are not available",
+                extra=self._describe(choice),
             )
             return None
 
@@ -390,8 +431,26 @@ class TradeExecutor:
         # записью оставил бы токены, о которых система не знает.
         await self._positions.create(position)
 
+        settled: Position | None
+        if isinstance(transaction, SwapTransaction):
+            settled = await self._send_buy(choice, position, transaction)
+        else:
+            settled = await self._place_buy(choice, adapter, position, transaction)
+        if settled is None:
+            return None
+        if settled.status is PositionStatus.HOLDING and self._check_exit is not None:
+            # Не ждём следующего такта расписания: между покупкой и первой
+            # проверкой прошло бы до десяти секунд, а отклонение столько
+            # может и не прожить.
+            await self._check_exit(settled)
+        return settled
+
+    async def _send_buy(
+        self, choice: _Choice, position: Position, transaction: SwapTransaction
+    ) -> Position:
+        """Отправить покупку транзакцией и дождаться квитанции."""
         sent = await self._sender.send(
-            network_id,
+            position.network_id,
             to=transaction.to,
             data=transaction.data,
             value=transaction.value,
@@ -406,7 +465,6 @@ class TradeExecutor:
             "trade opened",
             extra=self._describe(choice) | {"t_id": str(position.t_id), "tx": sent.tx_hash},
         )
-
         receipt = await self._sender.wait(
             sent, timeout=self._receipt_timeout, poll=self._receipt_poll, priority=_PRIORITY
         )
@@ -415,13 +473,53 @@ class TradeExecutor:
             # доведёт её. Считать её неудачной нельзя: транзакция может
             # попасть в блок позже.
             return position
-        settled = await self.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
-        if settled.status is PositionStatus.HOLDING and self._check_exit is not None:
-            # Не ждём следующего такта расписания: между покупкой и первой
-            # проверкой прошло бы до десяти секунд, а отклонение столько
-            # может и не прожить.
-            await self._check_exit(settled)
-        return settled
+        return await self.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
+
+    async def _place_buy(
+        self,
+        choice: _Choice,
+        adapter: AggregatorAdapter,
+        position: Position,
+        plan: SignedOrderPlan,
+    ) -> Position | None:
+        """Разместить покупку заявкой и дождаться её судьбы.
+
+        Газа у такой ноги нет, поэтому он записывается нулём, а не
+        оставляется неизвестным: неизвестный расход запретил бы считать
+        круг, тогда как здесь он действительно нулевой.
+
+        Неисполненная заявка — штатный исход: деньги остались на счету,
+        и сделка закрывается как несостоявшаяся, а не как убыточная.
+        """
+        if self._orders is None:  # pragma: no cover - проверено выше
+            return None
+        placed = await self._orders.place(adapter, plan)
+        position = position.model_copy(
+            update={
+                "buy_order_uid": placed.uid,
+                "buy_gas_wei": 0,
+                "buy_gas_units": 0,
+                "updated_at": self._clock.now(),
+            }
+        )
+        await self._positions.update(position)
+        _LOGGER.info(
+            "trade opened",
+            extra=self._describe(choice) | {"t_id": str(position.t_id), "order": placed.uid},
+        )
+        state = await self._orders.wait(adapter, placed, operation=OperationType.BUY)
+        if state is None:
+            # Заявка ещё в книге. Сделка остаётся в BUYING, и наблюдатель
+            # доведёт её: решатель может взять заявку позже.
+            return position
+        if state.outcome is not OrderOutcome.FILLED:
+            _LOGGER.info(
+                "trade cancelled: the buy order was not filled",
+                extra=self._describe(choice)
+                | {"t_id": str(position.t_id), "outcome": state.outcome.value},
+            )
+            return await self.settle_buy(position, succeeded=False)
+        return await self.settle_buy(position, succeeded=True)
 
     async def settle_buy(
         self, position: Position, *, succeeded: bool, receipt: TransactionReceipt | None = None
@@ -437,10 +535,15 @@ class TradeExecutor:
         Стоимость газа берётся из той же квитанции — расход и цена
         приходят вместе с ней, поэтому знание о расходе не стоит ни
         одного дополнительного запроса.
+
+        Без квитанции уже известное не затирается. У ноги, исполненной
+        заявкой, квитанции не бывает вовсе, а расход у неё — ноль, и это
+        знание: заменить его на «неизвестно» значило бы сделать круг
+        несчитаемым на ровном месте.
         """
         now = self._clock.now()
-        gas_wei = None if receipt is None else receipt.gas_cost_wei
-        gas_units = None if receipt is None else receipt.gas_used
+        gas_wei = position.buy_gas_wei if receipt is None else receipt.gas_cost_wei
+        gas_units = position.buy_gas_units if receipt is None else receipt.gas_used
         await self._record_calibration(position, gas_units)
         if not succeeded:
             updated = position.model_copy(
@@ -492,6 +595,12 @@ class TradeExecutor:
         if self._calibration is None or actual_units is None:
             return
         if position.buy_quoted_gas_units is None:
+            return
+        if position.buy_quoted_gas_units == 0 or actual_units == 0:
+            # Нога без газа поправке не подлежит: поправка — отношение
+            # потраченного к обещанному, а у нуля к нулю отношения нет.
+            # Записать такой замер значило бы испортить поправку, которой
+            # пользуются ноги, газ действительно платящие.
             return
         await self._calibration.record(
             position.network_id,

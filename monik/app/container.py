@@ -10,6 +10,7 @@ adapters → Resource Manager → подсистемы → Scheduler → Telegra
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -133,6 +134,7 @@ from monik.services.trading import (
     TransactionSender,
 )
 from monik.services.trading.costs import GasCostConverter
+from monik.services.trading.orders import SignedOrderRunner
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
 __all__ = ["Container", "Repositories", "build_container"]
@@ -461,6 +463,16 @@ def build_container(
             for network in config.enabled_networks
         }
         gas_costs = GasCostConverter(tokens=tokens, networks=networks, rates=conversion)
+        # Исполнение подписанной заявкой. Нужно провайдеру, который
+        # транзакции не отдаёт (``the_main_rules.md``, правило 16); для
+        # остальных остаётся неиспользованным.
+        order_runner = SignedOrderRunner(
+            wallet=wallet,
+            clock=clock,
+            sleeper=asyncio.sleep,
+            poll_seconds=config.trading.order_poll_seconds,
+            timeout_seconds=config.trading.order_timeout_seconds,
+        )
         executor = TradeExecutor(
             adapters={key.value: value for key, value in provider_adapters.items()},
             positions=positions_store,
@@ -480,6 +492,7 @@ def build_container(
             min_entry_profit_raw=int(
                 config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
             ),
+            orders=order_runner,
             max_offer_checks=config.trading.max_offer_checks,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
@@ -505,6 +518,7 @@ def build_container(
             slippage_bps=int(config.trading.slippage_percent * 100),
             long_wait_enabled=config.trading.max_wait_notice_enabled,
             long_wait_seconds=config.trading.max_wait_notice_seconds,
+            orders=order_runner,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
         )

@@ -24,12 +24,19 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from typing import Any, Protocol, runtime_checkable
 
+from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import MonikError
 from monik.domain.errors.classification import is_availability_failure
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    OrderState,
+    PlacedOrder,
+    SignedOrderPlan,
+    SwapTransaction,
+)
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
+from monik.domain.value_objects.identifiers import RequestId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.providers.contract import (
     AdapterCapabilities,
@@ -86,6 +93,33 @@ class HealthTrackingAdapter:
     async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
         """Собрать транзакцию, зафиксировав исход обращения."""
         return await self._observe(lambda: self._adapter.build_swap(request))
+
+    async def build_order(self, request: QuoteRequest) -> SignedOrderPlan:
+        """Собрать заявку, зафиксировав исход обращения."""
+        return await self._observe(lambda: self._adapter.build_order(request))
+
+    async def place_order(
+        self, plan: SignedOrderPlan, signature: str, *, request_id: RequestId | None = None
+    ) -> PlacedOrder:
+        """Разместить заявку, зафиксировав исход обращения."""
+        return await self._observe(
+            lambda: self._adapter.place_order(plan, signature, request_id=request_id)
+        )
+
+    async def order_state(
+        self,
+        network_id: NetworkId,
+        uid: str,
+        *,
+        operation: OperationType,
+        request_id: RequestId | None = None,
+    ) -> OrderState:
+        """Узнать судьбу заявки, зафиксировав исход обращения."""
+        return await self._observe(
+            lambda: self._adapter.order_state(
+                network_id, uid, operation=operation, request_id=request_id
+            )
+        )
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Проверить зафиксированный маршрут, зафиксировав исход обращения.

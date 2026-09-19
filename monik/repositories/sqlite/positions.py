@@ -34,7 +34,7 @@ _COLUMNS = (
     "raw_input, raw_acquired, raw_returned, "
     "raw_target_before_buy, raw_base_before_sell, buy_gas_wei, sell_gas_wei, raw_gas_cost, "
     "buy_quoted_gas_units, sell_quoted_gas_units, buy_gas_units, sell_gas_units, "
-    "buy_tx_hash, sell_tx_hash, "
+    "buy_tx_hash, sell_tx_hash, buy_order_uid, sell_order_uid, "
     "opened_at, updated_at, closed_at, long_wait_notified_at"
 )
 
@@ -57,6 +57,8 @@ _MUTABLE = (
     "sell_gas_units",
     "buy_tx_hash",
     "sell_tx_hash",
+    "buy_order_uid",
+    "sell_order_uid",
     "updated_at",
     "closed_at",
     "long_wait_notified_at",
@@ -111,6 +113,8 @@ class SqlitePositionRepository:
                 _raw(position.sell_gas_units),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
+                position.buy_order_uid,
+                position.sell_order_uid,
                 to_timestamp(position.opened_at),
                 to_timestamp(position.updated_at) if position.updated_at else None,
                 to_timestamp(position.closed_at) if position.closed_at else None,
@@ -139,6 +143,8 @@ class SqlitePositionRepository:
                 _raw(position.sell_gas_units),
                 position.buy_tx_hash,
                 position.sell_tx_hash,
+                position.buy_order_uid,
+                position.sell_order_uid,
                 to_timestamp(position.updated_at) if position.updated_at else None,
                 to_timestamp(position.closed_at) if position.closed_at else None,
                 to_timestamp(position.long_wait_notified_at)
@@ -247,6 +253,8 @@ def _to_domain(row: aiosqlite.Row) -> Position:
         sell_gas_units=_optional_raw(row, "sell_gas_units"),
         buy_tx_hash=_optional_str(row, "buy_tx_hash"),
         sell_tx_hash=_optional_str(row, "sell_tx_hash"),
+        buy_order_uid=_optional_str(row, "buy_order_uid"),
+        sell_order_uid=_optional_str(row, "sell_order_uid"),
         opened_at=from_timestamp(str(column(row, "opened_at"))),
         updated_at=_optional_time(row, "updated_at"),
         closed_at=_optional_time(row, "closed_at"),

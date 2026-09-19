@@ -86,6 +86,13 @@ class TradingConfig(ConfigSection):
     #: транзакция может попасть в блок позже, и её подберёт наблюдатель.
     receipt_timeout_seconds: int = Field(default=120, ge=1, le=3_600)
     receipt_poll_seconds: int = Field(default=2, ge=1, le=60)
+    #: Пауза между опросами книги заявок и предельное ожидание исхода.
+    #: Нужны провайдеру, исполняющему подписанной заявкой: у такой ноги
+    #: нет квитанции, и судьба узнаётся опросом
+    #: (``the_main_rules.md``, правило 16). Ожидание дольше срока жизни
+    #: самой заявки бессмысленно: после него она недействительна.
+    order_poll_seconds: int = Field(default=3, ge=1, le=60)
+    order_timeout_seconds: int = Field(default=300, ge=10, le=3600)
 
     #: Период отчёта о сделках в Telegram.
     report_interval_seconds: int = Field(default=1_800, ge=60, le=86_400)

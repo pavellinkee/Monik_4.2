@@ -24,7 +24,12 @@ from monik.domain.enums.operations import (
 )
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    OrderState,
+    PlacedOrder,
+    SignedOrderPlan,
+    SwapTransaction,
+)
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
 from monik.domain.models.route import Route
@@ -134,6 +139,11 @@ class AdapterCapabilities:
     #: Умеет ли адаптер собрать готовую транзакцию обмена. Без этого
     #: провайдер годится для поиска, но не для исполнения.
     supports_execution: bool = False
+    #: Исполняет ли провайдер подписанной офчейн заявкой вместо
+    #: транзакции (``the_main_rules.md``, правило 16). Признак выбирает
+    #: форму исполнения, а не разрешает её: разрешает
+    #: :attr:`supports_execution`.
+    supports_signed_orders: bool = False
 
     def supports_network(self, network_id: NetworkId) -> bool:
         """Поддерживается ли сеть."""
@@ -193,6 +203,35 @@ class AggregatorAdapter(Protocol):
 
     async def validate_fixed_route(self, request: QuoteRequest) -> RouteValidation:
         """Проверить, воспроизводится ли зафиксированный маршрут."""
+        ...
+
+    async def build_order(self, request: QuoteRequest) -> SignedOrderPlan:
+        """Собрать заявку, которую остаётся подписать и разместить.
+
+        Форма исполнения провайдера, который транзакции не отдаёт
+        (``the_main_rules.md``, правило 16). Адаптер, работающий
+        транзакциями, обязан сообщить :class:`UnsupportedError`.
+        """
+        ...
+
+    async def place_order(
+        self, plan: SignedOrderPlan, signature: str, *, request_id: RequestId | None = None
+    ) -> PlacedOrder:
+        """Разместить подписанную заявку в книге провайдера.
+
+        Подпись приходит готовой: адаптер ключа не видит.
+        """
+        ...
+
+    async def order_state(
+        self,
+        network_id: NetworkId,
+        uid: str,
+        *,
+        operation: OperationType,
+        request_id: RequestId | None = None,
+    ) -> OrderState:
+        """Узнать судьбу размещённой заявки."""
         ...
 
     async def build_swap(self, request: QuoteRequest) -> SwapTransaction:

@@ -11,16 +11,21 @@ from collections.abc import Callable
 from decimal import Decimal
 
 from monik.domain.enums.health import AdapterState
-from monik.domain.enums.operations import RouteValidationOutcome, RoutingMode
+from monik.domain.enums.operations import OperationType, RouteValidationOutcome, RoutingMode
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import MonikError
 from monik.domain.models.execution import (
     AllowanceKind,
     AllowanceRequirement,
+    OrderOutcome,
+    OrderState,
+    PlacedOrder,
+    SignedOrderPlan,
     SwapTransaction,
 )
 from monik.domain.models.fee import Fee
 from monik.domain.models.quote import Quote
+from monik.domain.value_objects.identifiers import RequestId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.providers.contract import (
     AdapterCapabilities,
@@ -74,6 +79,15 @@ class FakeAdapter:
         self._fees = fees
         self._state = state
         self.quote_calls: list[QuoteRequest] = []
+        #: Размещённые заявки и их состояния. Тест задаёт, чем кончится
+        #: каждая: исполнением, истечением срока или ожиданием.
+        self.placed_orders: list[PlacedOrder] = []
+        self.order_outcomes: dict[str, OrderState] = {}
+        self.default_order_outcome = OrderState(
+            outcome=OrderOutcome.FILLED,
+            executed_input_raw=0,
+            executed_output_raw=0,
+        )
         self.closed = False
 
     @property
@@ -108,6 +122,72 @@ class FakeAdapter:
             # проверяли бы поведение, которого в production не бывает.
             estimated_gas_price_wei=30_000_000_000,
         )
+
+    async def build_order(self, request: QuoteRequest) -> SignedOrderPlan:
+        """Собрать подставную заявку.
+
+        **Test implementation** (``CLAUDE.md`` §10). Нужна, чтобы
+        проверять путь «решение — заявка — размещение — ожидание», не
+        обращаясь к настоящей книге заявок.
+        """
+        quote = await self.get_quote(request)
+        bps = 10 if request.slippage_bps is None else request.slippage_bps
+        minimum = quote.output_amount.raw - quote.output_amount.raw * bps // 10_000
+        valid_to = int(self._clock.now().timestamp()) + 180
+        return SignedOrderPlan(
+            provider_id=self._provider_id,
+            network_id=request.network_id,
+            chain_id=1337,
+            typed_data={
+                "types": {"Order": [{"name": "sellAmount", "type": "uint256"}]},
+                "primaryType": "Order",
+                "domain": {"name": "Fake", "version": "v1", "chainId": 1337},
+                "message": {
+                    "sellToken": str(request.input_token.address),
+                    "buyToken": str(request.output_token.address),
+                    "receiver": "0x" + "c6" * 20,
+                    "sellAmount": str(request.input_amount.raw),
+                    "buyAmount": str(minimum),
+                    "validTo": valid_to,
+                },
+            },
+            allowances=(
+                AllowanceRequirement(
+                    kind=AllowanceKind.ERC20,
+                    contract=str(request.input_token.address),
+                    spender="0x" + "33" * 20,
+                ),
+            ),
+            quote=quote,
+            min_output_raw=minimum,
+            valid_to=valid_to,
+        )
+
+    async def place_order(
+        self, plan: SignedOrderPlan, signature: str, *, request_id: RequestId | None = None
+    ) -> PlacedOrder:
+        """Принять подставную заявку."""
+        if self._error is not None:
+            raise self._error
+        placed = PlacedOrder(
+            provider_id=self._provider_id,
+            network_id=plan.network_id,
+            uid=f"0xfake{len(self.placed_orders):04d}",
+            valid_to=plan.valid_to,
+        )
+        self.placed_orders.append(placed)
+        return placed
+
+    async def order_state(
+        self,
+        network_id: NetworkId,
+        uid: str,
+        *,
+        operation: OperationType,
+        request_id: RequestId | None = None,
+    ) -> OrderState:
+        """Вернуть заданный тестом исход заявки."""
+        return self.order_outcomes.get(uid, self.default_order_outcome)
 
     async def build_swap(self, request: QuoteRequest) -> SwapTransaction:
         """Собрать детерминированную транзакцию из котировки.

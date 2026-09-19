@@ -15,15 +15,19 @@ from decimal import Decimal
 from eth_account import Account
 
 from monik.config.secrets import SecretValue
+from monik.domain.enums.operations import RoutingMode
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
+from monik.domain.models.execution import OrderOutcome, OrderState
 from monik.domain.models.position import Position
 from monik.domain.value_objects.identifiers import TId
+from monik.infrastructure.providers.contract import AdapterCapabilities
 from monik.infrastructure.providers.fake import FakeAdapter
 from monik.services.calculator import ProfitCalculator
 from monik.services.observability import FakeClock
 from monik.services.trading import PositionWatcher, TradeExecutor, TradingWallet
+from monik.services.trading.orders import SignedOrderRunner
 from tests import factories as f
 from tests.unit.trading.support import (
     FixedCosts,
@@ -626,3 +630,115 @@ class TestRealOffer:
         room = acquired * Decimal("0.001")
 
         assert room > Decimal("0.005") * 10
+
+
+def _order_watcher(
+    node: ScriptedNode,
+    positions: MemoryPositions,
+    *,
+    outcome: OrderOutcome = OrderOutcome.FILLED,
+    sell_rate: str = "10.1",
+) -> tuple[PositionWatcher, FakeAdapter]:
+    """Наблюдатель, у которого продажа идёт подписанной заявкой."""
+    active = FakeClock(f.NOW)
+    exit_costs = FixedCosts(COSTS_RAW)
+    wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
+    adapter = FakeAdapter(
+        ProviderId.COW,
+        active,
+        rate=_rate(sell_rate),
+        capabilities=AdapterCapabilities(
+            provider_id=ProviderId.COW,
+            supported_networks=frozenset({f.POLYGON}),
+            routing_modes=frozenset({RoutingMode.CLASSIC}),
+            supports_execution=True,
+            supports_signed_orders=True,
+        ),
+    )
+    adapter.default_order_outcome = OrderState(
+        outcome=outcome, executed_input_raw=0, executed_output_raw=0
+    )
+    account = build_account(node, active, wallet.address)
+    sender = build_sender(node, active, wallet)
+
+    async def sleeper(seconds: float) -> None:
+        return None
+
+    runner = SignedOrderRunner(wallet=wallet, clock=active, sleeper=sleeper)
+    executor = TradeExecutor(
+        adapters={ProviderId.COW.value: adapter},
+        positions=positions,
+        sequences=MemorySequences(),
+        account=account,
+        sender=sender,
+        tokens=_tokens(),
+        calculator=ProfitCalculator(active),
+        costs=exit_costs,
+        calibration=None,
+        clock=active,
+        is_execution_open=lambda: True,
+        slippage_bps=0,
+        min_entry_profit_raw=0,
+        orders=runner,
+        receipt_timeout_seconds=1,
+        receipt_poll_seconds=1,
+    )
+    watcher = PositionWatcher(
+        adapters={ProviderId.COW.value: adapter},
+        positions=positions,
+        account=account,
+        sender=sender,
+        executor=executor,
+        costs=exit_costs,
+        calibration=None,
+        clock=active,
+        min_exit_profit_raw=10_000,
+        min_exit_profit_waiting_raw=10_000,
+        slippage_bps=0,
+        long_wait_enabled=True,
+        long_wait_seconds=7_200,
+        orders=runner,
+        receipt_timeout_seconds=1,
+        receipt_poll_seconds=1,
+    )
+    return watcher, adapter
+
+
+class TestOrderExit:
+    """Выход через провайдера, который транзакции не отдаёт (правило 16)."""
+
+    async def test_a_filled_order_closes_the_trade(self) -> None:
+        """Выручка считается приростом остатка — как и при транзакции."""
+        node = ScriptedNode(
+            balances={str(f.USDT.address).lower(): 0},
+            after_send={str(f.USDT.address).lower(): 60_000_000},
+        )
+        positions = MemoryPositions()
+        position = _position(sell_provider_id=ProviderId.COW, buy_provider_id=ProviderId.COW)
+        await positions.create(position)
+        watcher, adapter = _order_watcher(node, positions)
+
+        await watcher.tick()
+
+        closed = positions.items[str(position.t_id)]
+        assert closed.status is PositionStatus.CLOSED
+        assert closed.sell_order_uid == adapter.placed_orders[0].uid
+        assert closed.sell_tx_hash is None
+        # Продажа заявкой газа не стоила, и это знание: круг посчитан.
+        assert closed.sell_gas_wei == 0
+        assert node.sent == []
+
+    async def test_an_unfilled_order_returns_the_trade_to_waiting(self) -> None:
+        """Заявку не взяли — токен остался у нас, и это не потеря."""
+        node = ScriptedNode(balances={str(f.USDT.address).lower(): 0})
+        positions = MemoryPositions()
+        position = _position(sell_provider_id=ProviderId.COW, buy_provider_id=ProviderId.COW)
+        await positions.create(position)
+        watcher, _ = _order_watcher(node, positions, outcome=OrderOutcome.EXPIRED)
+
+        await watcher.tick()
+
+        waiting = positions.items[str(position.t_id)]
+        assert waiting.status is PositionStatus.HOLDING
+        assert waiting.sell_order_uid is None
+        assert waiting.closed_at is None

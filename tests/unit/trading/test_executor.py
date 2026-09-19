@@ -14,19 +14,22 @@ from monik.config import parse_configuration
 from monik.config.secrets import SecretValue
 from monik.domain.enums.lifecycle import ScanStatus
 from monik.domain.enums.modes import ScanMode
-from monik.domain.enums.operations import OperationType
+from monik.domain.enums.operations import OperationType, RoutingMode
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
+from monik.domain.models.execution import OrderOutcome, OrderState
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.scan import Scan, ScanScope
 from monik.domain.value_objects.identifiers import ScanId
+from monik.infrastructure.providers.contract import AdapterCapabilities
 from monik.infrastructure.providers.fake import FakeAdapter
 from monik.services.calculator import ProfitCalculator
 from monik.services.level1.results import ScanResult
 from monik.services.observability import FakeClock
 from monik.services.registries import TokenRegistry
 from monik.services.trading import TradeExecutor, TradingWallet
+from monik.services.trading.orders import SignedOrderRunner
 from tests import factories as f
 from tests.component.level1.conftest import level1_document
 from tests.unit.config.conftest import VALID_ENV
@@ -577,3 +580,182 @@ class TestCandidateIteration:
 
         assert position is not None
         assert position.raw_input == 50_000_000
+
+
+def _order_adapter(clock: FakeClock, rate: str = "1") -> FakeAdapter:
+    """Двойник провайдера, исполняющего подписанной заявкой."""
+    return FakeAdapter(
+        ProviderId.COW,
+        clock,
+        rate=Decimal(rate),
+        capabilities=AdapterCapabilities(
+            provider_id=ProviderId.COW,
+            supported_networks=frozenset({f.POLYGON}),
+            routing_modes=frozenset({RoutingMode.CLASSIC}),
+            supports_execution=True,
+            supports_signed_orders=True,
+        ),
+    )
+
+
+def _order_executor(
+    node: ScriptedNode,
+    positions: MemoryPositions,
+    *,
+    orders: SignedOrderRunner | None = None,
+    outcome: OrderOutcome = OrderOutcome.FILLED,
+    rate: str = "1",
+) -> tuple[TradeExecutor, FakeAdapter]:
+    """Исполнитель, у которого покупка идёт заявкой, а продажа — тоже."""
+    clock = FakeClock(f.NOW)
+    wallet = _wallet()
+    adapter = _order_adapter(clock, rate=rate)
+    adapter.default_order_outcome = OrderState(
+        outcome=outcome, executed_input_raw=0, executed_output_raw=0
+    )
+
+    async def sleeper(seconds: float) -> None:
+        return None
+
+    executor = TradeExecutor(
+        adapters={ProviderId.COW.value: adapter},
+        positions=positions,
+        sequences=MemorySequences(),
+        account=build_account(node, clock, wallet.address),
+        sender=build_sender(node, clock, wallet),
+        tokens=_tokens(),
+        calculator=ProfitCalculator(clock),
+        costs=FixedCosts(0),
+        calibration=None,
+        clock=clock,
+        is_execution_open=lambda: True,
+        slippage_bps=0,
+        min_entry_profit_raw=0,
+        orders=orders
+        if orders is not None
+        else SignedOrderRunner(wallet=wallet, clock=clock, sleeper=sleeper),
+        receipt_timeout_seconds=1,
+        receipt_poll_seconds=1,
+    )
+    return executor, adapter
+
+
+class TestOrderExecution:
+    """Покупка провайдером, который транзакции не отдаёт (правило 16)."""
+
+    async def test_the_position_records_the_order_and_no_gas(self) -> None:
+        """Заявка вместо хеша, ноль вместо неизвестного расхода.
+
+        Неизвестный расход запретил бы считать круг; здесь он
+        действительно нулевой, потому что своей транзакции не возникает.
+        """
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, adapter = _order_executor(node, positions)
+
+        await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        100_000_000,
+                        "0.20",
+                        buy_provider=ProviderId.COW,
+                        sell_provider=ProviderId.COW,
+                    )
+                ),
+            )
+        )
+
+        assert len(positions.items) == 1
+        opened = next(iter(positions.items.values()))
+        assert opened.buy_order_uid == adapter.placed_orders[0].uid
+        assert opened.buy_tx_hash is None
+        assert opened.buy_gas_wei == 0
+        assert opened.buy_gas_units == 0
+
+    async def test_nothing_is_sent_to_the_chain(self) -> None:
+        """Заявка подписывается, а не отправляется: своей транзакции нет."""
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, _ = _order_executor(node, positions)
+
+        await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        100_000_000,
+                        "0.20",
+                        buy_provider=ProviderId.COW,
+                        sell_provider=ProviderId.COW,
+                    )
+                ),
+            )
+        )
+
+        assert node.sent == []
+
+    async def test_an_unfilled_order_closes_the_trade_as_not_taken(self) -> None:
+        """Неисполненная заявка — не убыток: деньги остались на счету.
+
+        Сделка закрывается как несостоявшаяся, а возврат равен вложенному:
+        мы ничего не потратили, включая газ.
+        """
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, _ = _order_executor(node, positions, outcome=OrderOutcome.EXPIRED)
+
+        await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        100_000_000,
+                        "0.20",
+                        buy_provider=ProviderId.COW,
+                        sell_provider=ProviderId.COW,
+                    )
+                ),
+            )
+        )
+
+        opened = next(iter(positions.items.values()))
+        assert opened.status is PositionStatus.FAILED
+        assert opened.raw_returned == opened.raw_input
+        assert opened.buy_gas_wei == 0
+
+    async def test_the_trade_is_refused_when_orders_cannot_be_signed(self) -> None:
+        """Открывать то, что нечем исполнить, нельзя."""
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        clock = FakeClock(f.NOW)
+        wallet = _wallet()
+        executor = TradeExecutor(
+            adapters={ProviderId.COW.value: _order_adapter(clock)},
+            positions=positions,
+            sequences=MemorySequences(),
+            account=build_account(node, clock, wallet.address),
+            sender=build_sender(node, clock, wallet),
+            tokens=_tokens(),
+            calculator=ProfitCalculator(clock),
+            costs=FixedCosts(0),
+            calibration=None,
+            clock=clock,
+            is_execution_open=lambda: True,
+            slippage_bps=0,
+            min_entry_profit_raw=0,
+            orders=None,
+        )
+
+        await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        100_000_000,
+                        "0.20",
+                        buy_provider=ProviderId.COW,
+                        sell_provider=ProviderId.COW,
+                    )
+                ),
+            )
+        )
+
+        assert positions.items == {}

@@ -27,6 +27,7 @@ __all__ = [
     "AllowanceKind",
     "AllowanceRequirement",
     "ExecutionOffer",
+    "ExecutionPlan",
     "OrderOutcome",
     "OrderState",
     "PlacedOrder",
@@ -226,3 +227,11 @@ class OrderState(DomainModel):
     def is_final(self) -> bool:
         """Изменится ли состояние ещё."""
         return self.outcome.is_final
+
+
+#: Формы исполнения, которые система умеет довести до конца. Их ровно
+#: две, и различие между ними существенно: транзакцию отправляют в сеть
+#: и ждут квитанцию, заявку подписывают и ждут решателя. Протокол
+#: :class:`ExecutionOffer` описывает то общее, чего достаточно для
+#: **решения**; этот союз — то, чего достаточно для **исполнения**.
+ExecutionPlan = SwapTransaction | SignedOrderPlan

@@ -33,7 +33,12 @@ from decimal import Decimal
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    ExecutionPlan,
+    OrderOutcome,
+    SignedOrderPlan,
+    SwapTransaction,
+)
 from monik.domain.models.position import Position
 from monik.domain.value_objects.identifiers import RequestId
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
@@ -41,6 +46,11 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.chain import ChainAccount
 from monik.services.trading.executor import TradeExecutor
+from monik.services.trading.orders import (
+    SignedOrderRunner,
+    executes_with_orders,
+    leg_gas_units,
+)
 from monik.services.trading.ports import ExecutionCosts, GasCalibrationRecorder, PositionStore
 from monik.services.trading.sender import SentTransaction, TransactionSender
 
@@ -91,6 +101,7 @@ class PositionWatcher:
         slippage_bps: int,
         long_wait_enabled: bool,
         long_wait_seconds: int,
+        orders: SignedOrderRunner | None = None,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
     ) -> None:
@@ -107,6 +118,7 @@ class PositionWatcher:
         self._slippage_bps = slippage_bps
         self._long_wait_enabled = long_wait_enabled
         self._long_wait = timedelta(seconds=long_wait_seconds)
+        self._orders = orders
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
 
@@ -160,7 +172,10 @@ class PositionWatcher:
         return await self._consider_exit(position, immediate=False)
 
     async def _settle_pending_buy(self, position: Position) -> None:
-        """Подобрать покупку, квитанция которой ещё не пришла."""
+        """Подобрать покупку, исход которой ещё не известен."""
+        if position.buy_order_uid is not None:
+            await self._settle_pending_buy_order(position)
+            return
         if position.buy_tx_hash is None:
             return
         # Подбор покупки — работа покупки, а не продажи: приоритет тот же,
@@ -172,8 +187,28 @@ class PositionWatcher:
             return
         await self._executor.settle_buy(position, succeeded=receipt.succeeded, receipt=receipt)
 
+    async def _settle_pending_buy_order(self, position: Position) -> None:
+        """Подобрать покупку, размещённую заявкой.
+
+        Заявка могла исполниться уже после того, как мы перестали ждать,
+        или после перезапуска. Пока она открыта, исход неизвестен — и
+        это не сбой: решатель вправе взять её вплоть до истечения срока.
+        """
+        adapter = self._adapters.get(position.buy_provider_id.value)
+        if adapter is None or position.buy_order_uid is None:
+            return
+        state = await adapter.order_state(
+            position.network_id, position.buy_order_uid, operation=OperationType.BUY
+        )
+        if not state.is_final:
+            return
+        await self._executor.settle_buy(position, succeeded=state.outcome is OrderOutcome.FILLED)
+
     async def _settle_pending_sell(self, position: Position) -> None:
-        """Подобрать продажу, квитанция которой ещё не пришла."""
+        """Подобрать продажу, исход которой ещё не известен."""
+        if position.sell_order_uid is not None:
+            await self._settle_pending_sell_order(position)
+            return
         if position.sell_tx_hash is None:
             return
         receipt = await self._account.receipt(
@@ -203,6 +238,32 @@ class PositionWatcher:
                 )
             )
             return
+        await self._close_after_sale(
+            position, spent_on_selling=spent_on_selling, sold_units=sold_units
+        )
+
+    async def _settle_pending_sell_order(self, position: Position) -> None:
+        """Подобрать продажу, размещённую заявкой."""
+        adapter = self._adapters.get(position.sell_provider_id.value)
+        if adapter is None or position.sell_order_uid is None:
+            return
+        state = await adapter.order_state(
+            position.network_id, position.sell_order_uid, operation=OperationType.SELL
+        )
+        if not state.is_final:
+            return
+        await self._settle_order_sell(position, state.outcome)
+
+    async def _close_after_sale(
+        self, position: Position, *, spent_on_selling: int | None, sold_units: int | None
+    ) -> None:
+        """Закрыть сделку по факту продажи.
+
+        Общее для обеих форм исполнения: выручка считается приростом
+        остатка, а не берётся из обещания, и потому не зависит от того,
+        транзакцией шла продажа или подписанной заявкой.
+        """
+        now = self._clock.now()
         if position.raw_base_before_sell is None:
             # Так может выглядеть только сделка, записанная версией без
             # этого поля: с тех пор его ставит сама отправка продажи.
@@ -251,7 +312,7 @@ class PositionWatcher:
             "trade closed",
             extra=log_fields(
                 t_id=str(position.t_id),
-                tx=position.sell_tx_hash or "",
+                tx=position.sell_tx_hash or position.sell_order_uid or "",
                 returned=str(
                     Decimal(closed.raw_returned or 0).scaleb(-position.base_token.decimals)
                 ),
@@ -307,7 +368,7 @@ class PositionWatcher:
         if gross < needed:
             return self._wait(position, profit=gross, needed=needed, costs=None)
 
-        transaction = await adapter.build_swap(request)
+        transaction = await self._build_offer(adapter, request)
         costs = await self._exit_costs_raw(position, transaction)
         if costs is None:
             # Стоимость круга неизвестна. Продавать вслепую нельзя:
@@ -337,7 +398,20 @@ class PositionWatcher:
         )
         return None
 
-    async def _exit_costs_raw(self, position: Position, transaction: SwapTransaction) -> int | None:
+    async def _build_offer(
+        self, adapter: AggregatorAdapter, request: QuoteRequest
+    ) -> ExecutionPlan:
+        """Предложение агрегатора в той форме, в какой он его даёт.
+
+        Одни отдают транзакцию, другой — заявку на подпись
+        (``the_main_rules.md``, правило 16). Обязательство есть у обеих
+        форм, и решение о выходе принимается по нему одинаково.
+        """
+        if executes_with_orders(adapter):
+            return await adapter.build_order(request)
+        return await adapter.build_swap(request)
+
+    async def _exit_costs_raw(self, position: Position, transaction: ExecutionPlan) -> int | None:
         """Во что обойдётся круг целиком, в базовом токене.
 
         Считается всё, что сделка стоит и будет стоить: покупка, уже
@@ -347,7 +421,7 @@ class PositionWatcher:
         """
         price = await self._account.gas_price(position.network_id, priority=_PRIORITY)
         total_wei = _total_wei(
-            position.buy_gas_wei, position.sell_gas_wei, transaction.gas_limit * price
+            position.buy_gas_wei, position.sell_gas_wei, leg_gas_units(transaction) * price
         )
         if total_wei is None:
             _LOGGER.warning(
@@ -402,13 +476,20 @@ class PositionWatcher:
         )
         return self._long_wait_notice(position)
 
-    async def _sell(self, position: Position, transaction: SwapTransaction) -> None:
-        """Проверить и отправить продажу.
+    async def _sell(self, position: Position, offer: ExecutionPlan) -> None:
+        """Проверить и исполнить продажу.
 
-        Транзакция приходит уже собранной: её собрали, чтобы узнать
+        Предложение приходит уже собранным: его собрали, чтобы узнать
         стоимость выхода, и собирать второй раз значило бы потратить
         лишний запрос на то же самое.
+
+        Форма исполнения принадлежит агрегатору: один исполнит
+        транзакцией, другой — подписанной заявкой.
         """
+        if not isinstance(offer, SwapTransaction):
+            await self._place_sell(position, offer)
+            return
+        transaction = offer
         simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:
             _LOGGER.warning(
@@ -442,6 +523,76 @@ class PositionWatcher:
         )
         if receipt is not None:
             await self._settle_pending_sell(selling)
+
+    async def _place_sell(self, position: Position, plan: SignedOrderPlan) -> None:
+        """Исполнить продажу подписанной заявкой.
+
+        Симуляции здесь нет и быть не может: транзакции не существует.
+        Защитой служит предельная сумма самой заявки — меньше решатель
+        отдать не вправе, и именно по ней принято решение о выходе.
+
+        Газ у такой ноги нулевой, и записывается он нулём: «неизвестно»
+        запретило бы посчитать круг, тогда как расход действительно
+        отсутствует.
+        """
+        if self._orders is None:
+            _LOGGER.warning(
+                "exit postponed: signed orders are not available",
+                extra=log_fields(t_id=str(position.t_id)),
+            )
+            return
+        adapter = self._adapters.get(position.sell_provider_id.value)
+        if adapter is None:  # pragma: no cover - проверено вызывающим
+            return
+        # Остаток до продажи запоминается перед размещением: выручка —
+        # это прирост, и досчитать его может уже другой процесс.
+        before = await self._account.token_balance(position.base_token, priority=_PRIORITY)
+        placed = await self._orders.place(adapter, plan)
+        selling = position.model_copy(
+            update={
+                "status": PositionStatus.SELLING,
+                "sell_order_uid": placed.uid,
+                "sell_gas_wei": 0,
+                "sell_gas_units": 0,
+                "raw_base_before_sell": before.raw,
+                "updated_at": self._clock.now(),
+            }
+        )
+        await self._positions.update(selling)
+        state = await self._orders.wait(adapter, placed, operation=OperationType.SELL)
+        if state is None:
+            # Заявка ещё в книге: сделка остаётся в SELLING, и следующий
+            # такт наблюдателя её подберёт.
+            return
+        await self._settle_order_sell(selling, state.outcome)
+
+    async def _settle_order_sell(self, position: Position, outcome: OrderOutcome) -> None:
+        """Зафиксировать исход продажи, исполнявшейся заявкой."""
+        if outcome is not OrderOutcome.FILLED:
+            # Заявка не исполнилась — токен остался у нас, и денег это не
+            # стоило. Возвращаемся к ожиданию: это не потеря, а неудачная
+            # попытка выхода.
+            _LOGGER.info(
+                "exit order was not filled",
+                extra=log_fields(
+                    t_id=str(position.t_id),
+                    order=position.sell_order_uid or "",
+                    outcome=outcome.value,
+                ),
+            )
+            await self._positions.update(
+                position.model_copy(
+                    update={
+                        "status": PositionStatus.HOLDING,
+                        "sell_order_uid": None,
+                        "updated_at": self._clock.now(),
+                    }
+                )
+            )
+            return
+        await self._close_after_sale(
+            position, spent_on_selling=position.sell_gas_wei, sold_units=position.sell_gas_units
+        )
 
     def _long_wait_notice(self, position: Position) -> LongWaitNotice | None:
         """Сообщить о затянувшемся ожидании — один раз, а не каждый такт."""

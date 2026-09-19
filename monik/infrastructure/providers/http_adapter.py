@@ -18,6 +18,7 @@ from typing import Any
 from monik.config.secrets import SecretValue
 from monik.config.sections.providers import ProviderConfig
 from monik.domain.enums.capability import CapabilityOperation
+from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.errors import (
@@ -27,7 +28,12 @@ from monik.domain.errors import (
     RouteRejectedError,
     UnsupportedError,
 )
-from monik.domain.models.execution import SwapTransaction
+from monik.domain.models.execution import (
+    OrderState,
+    PlacedOrder,
+    SignedOrderPlan,
+    SwapTransaction,
+)
 from monik.domain.models.resource import ResourceKey, ResourceRequest
 from monik.domain.value_objects.identifiers import CorrelationId, RequestId
 from monik.domain.value_objects.identity import NetworkId
@@ -88,6 +94,44 @@ class HttpProviderAdapter:
         raise UnsupportedError(
             f"{self._provider_id.value} adapter cannot build swap transactions",
             code="provider_execution_unsupported",
+            provider_code=self._provider_id.value,
+        )
+
+    async def build_order(self, request: QuoteRequest) -> SignedOrderPlan:
+        """Заявками этот провайдер не исполняет.
+
+        Форма исполнения — свойство провайдера, а не выбор вызывающего.
+        Отказ честнее подделки: тот, кто отдаёт транзакцию, заявку
+        собрать не может (``the_main_rules.md``, правило 16).
+        """
+        raise UnsupportedError(
+            f"{self._provider_id.value} adapter executes transactions, not signed orders",
+            code="provider_orders_unsupported",
+            provider_code=self._provider_id.value,
+        )
+
+    async def place_order(
+        self, plan: SignedOrderPlan, signature: str, *, request_id: RequestId | None = None
+    ) -> PlacedOrder:
+        """Книги заявок у этого провайдера нет."""
+        raise UnsupportedError(
+            f"{self._provider_id.value} adapter has no order book",
+            code="provider_orders_unsupported",
+            provider_code=self._provider_id.value,
+        )
+
+    async def order_state(
+        self,
+        network_id: NetworkId,
+        uid: str,
+        *,
+        operation: OperationType,
+        request_id: RequestId | None = None,
+    ) -> OrderState:
+        """Книги заявок у этого провайдера нет."""
+        raise UnsupportedError(
+            f"{self._provider_id.value} adapter has no order book",
+            code="provider_orders_unsupported",
             provider_code=self._provider_id.value,
         )
 

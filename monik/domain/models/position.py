@@ -80,6 +80,12 @@ class Position(DomainModel):
 
     buy_tx_hash: str | None = None
     sell_tx_hash: str | None = None
+    #: Идентификаторы подписанных заявок — у ног, исполняемых книгой, а
+    #: не цепью (``the_main_rules.md``, правило 16). Ноги круга могут
+    #: исполняться по-разному, поэтому поля отдельные: по ним видно, чем
+    #: именно шла нога, и незавершённую есть чем восстановить.
+    buy_order_uid: str | None = None
+    sell_order_uid: str | None = None
 
     opened_at: UtcDatetime
     updated_at: UtcDatetime | None = None
