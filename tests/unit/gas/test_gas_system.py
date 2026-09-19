@@ -161,7 +161,15 @@ class TestQuotedGasPrice:
             prefer_quoted_price=prefer,
         )
 
-    async def test_quoted_price_is_used_without_asking_the_node(self) -> None:
+    async def test_the_network_price_wins_over_the_quoted_one(self) -> None:
+        """Цена сети точнее котировки, и потому идёт первой.
+
+        Замер 19.09: за единицу газа мы заплатили 277,2 и 278,3 gwei —
+        это квитанции двух наших разрешений. Узел в тот же момент
+        называл 279, а котировка Uniswap — 445. Котировка рассчитана на
+        то, чтобы транзакция прошла наверняка, а не на то, чтобы
+        предсказать расход; для решения о сделке нужна вторая величина.
+        """
         node = _CountingProvider(wei_per_gas=100)
         estimator = self._estimator((node,), prefer=True)
 
@@ -169,9 +177,24 @@ class TestQuotedGasPrice:
 
         assert gas.status is FeeStatus.KNOWN
         assert gas.gas_price is not None
+        assert gas.gas_price.wei_per_gas == 100
+        assert node.calls == 1
+
+    async def test_the_quoted_price_covers_a_silent_network(self) -> None:
+        """Котировка остаётся запасным источником, а не исчезает.
+
+        Публичные узлы закрываются без предупреждения, и цена из
+        котировки — это знание, которое уже получено. Терять его нельзя.
+        """
+        silent = _CountingProvider(wei_per_gas=None)
+        estimator = self._estimator((silent,), prefer=True)
+
+        gas = await estimator.estimate(f.POLYGON, gas_units=1000, quoted_price_wei=7)
+
+        assert gas.status is FeeStatus.KNOWN
+        assert gas.gas_price is not None
         assert gas.gas_price.wei_per_gas == 7
         assert gas.gas_price.source == "quote"
-        assert node.calls == 0
 
     async def test_node_is_used_when_the_provider_reports_no_price(self) -> None:
         node = _CountingProvider(wei_per_gas=100)
@@ -208,12 +231,14 @@ class _CountingProvider:
 
     requires_request = True
 
-    def __init__(self, *, wei_per_gas: int) -> None:
+    def __init__(self, *, wei_per_gas: int | None) -> None:
         self._wei_per_gas = wei_per_gas
         self.calls = 0
 
-    async def gas_price(self, network_id: object) -> GasPrice:
+    async def gas_price(self, network_id: object) -> GasPrice | None:
         self.calls += 1
+        if self._wei_per_gas is None:
+            return None
         return GasPrice(
             network_id=f.POLYGON,
             wei_per_gas=self._wei_per_gas,

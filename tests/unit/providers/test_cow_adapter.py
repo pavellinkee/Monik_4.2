@@ -14,7 +14,14 @@ import pytest
 
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
-from monik.domain.errors import DataError, NoRouteError, RouteRejectedError, UnsupportedError
+from monik.domain.errors import (
+    AuthenticationError,
+    DataError,
+    NoRouteError,
+    ProviderError,
+    RouteRejectedError,
+    UnsupportedError,
+)
 from monik.domain.models.execution import AllowanceKind, OrderOutcome
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import FakeHttpClient, HttpResponse
@@ -337,3 +344,54 @@ class TestCapabilities:
 
         assert uniswap.capabilities.supports_signed_orders is False
         assert executes_with_orders(uniswap) is False
+
+
+class TestEdgeRefusal:
+    """Отказ пограничного узла — не отвергнутый ключ.
+
+    19.09 CloudFront закрыл доступ по частоте обращений, и отказ пришёл
+    статусом 403. Классификация по умолчанию назвала это «провайдер
+    отверг учётные данные», хотя у книги заявок учётных данных нет вовсе:
+    оператор получил уведомление, отправляющее искать несуществующую
+    причину.
+    """
+
+    @pytest.mark.parametrize("status", [401, 403, 429])
+    async def test_edge_refusal_is_temporary_not_authentication(self, status: int) -> None:
+        # Временный отказ вызывает повтор — двойник должен ответить
+        # столько же раз, сколько Resource Manager попробует.
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=status,
+                    text="<HTML><H1>403 ERROR</H1>Request blocked.</HTML>",
+                    headers={"Server": "CloudFront"},
+                )
+            ]
+            * 3
+        )
+
+        with pytest.raises(ProviderError) as refusal:
+            await adapter.get_quote(_request())
+
+        assert refusal.value.info.code == "provider_temporary_failure"
+        assert not isinstance(refusal.value, AuthenticationError)
+        assert "rate limit" in str(refusal.value)
+
+    async def test_the_refusing_server_is_named(self) -> None:
+        """Оператору нужно видеть, кто отказал, а не гадать."""
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=403,
+                    text="blocked",
+                    headers={"Server": "CloudFront"},
+                )
+            ]
+            * 3
+        )
+
+        with pytest.raises(ProviderError) as refusal:
+            await adapter.get_quote(_request())
+
+        assert "CloudFront" in str(refusal.value)

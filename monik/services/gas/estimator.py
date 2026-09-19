@@ -83,9 +83,16 @@ class GasEstimator:
                 source=source,
             )
 
-        price = self._quoted_price(network_id, quoted_price_wei, now)
+        # Цена сети идёт первой, котировка — запасным источником.
+        # Замер 19.09: за единицу газа мы заплатили 277,2 и 278,3 gwei
+        # (квитанции двух разрешений), узел в тот же момент называл
+        # 279 gwei, а котировка Uniswap — 445. Котировка завышает цену
+        # примерно в полтора раза: она рассчитана на то, чтобы
+        # транзакция прошла наверняка, а не на то, чтобы предсказать
+        # расход. Для решения о сделке нужна вторая величина.
+        price = await self._first_available_price(network_id, allow_remote=allow_remote_lookup)
         if price is None:
-            price = await self._first_available_price(network_id, allow_remote=allow_remote_lookup)
+            price = self._quoted_price(network_id, quoted_price_wei, now)
         if price is None:
             return Gas(
                 network_id=network_id,
@@ -126,12 +133,29 @@ class GasEstimator:
     async def _first_available_price(
         self, network_id: NetworkId, *, allow_remote: bool = True
     ) -> GasPrice | None:
-        """Первая доступная свежая цена среди настроенных источников."""
+        """Первая доступная свежая цена среди настроенных источников.
+
+        Когда обращаться наружу нельзя, у источника всё равно
+        спрашивается уже известное: запрет касается запроса, а не
+        знания. Источник, который умеет ответить из памяти, отвечает.
+        """
         now = self._clock.now()
         for provider in self._providers:
             if provider.requires_request and not allow_remote:
+                cached = self._cached_price(provider, network_id)
+                if cached is not None and cached.is_fresh(now):
+                    return cached
                 continue
             price = await provider.gas_price(network_id)
             if price is not None and price.is_fresh(now):
                 return price
         return None
+
+    @staticmethod
+    def _cached_price(provider: GasPriceProvider, network_id: NetworkId) -> GasPrice | None:
+        """Уже известная источнику цена, если он умеет её помнить."""
+        remember = getattr(provider, "cached_price", None)
+        if remember is None:
+            return None
+        cached = remember(network_id)
+        return cached if isinstance(cached, GasPrice) else None

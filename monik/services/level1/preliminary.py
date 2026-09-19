@@ -72,10 +72,13 @@ class PreliminaryEvaluator:
             buy_quote.network_id,
             gas_units=round_trip_gas_units(buy_quote, sell_quote, correction=self._gas_correction),
             quoted_price_wei=_quoted_gas_price(buy_quote, sell_quote),
-            # Этап поиска не делает ради газа ни одного лишнего запроса:
-            # берётся только то, что уже пришло вместе с котировкой.
-            # Полная стоимость сети проверяется на этапе подтверждения.
-            allow_remote_lookup=False,
+            # Цена сети спрашивается, но не в каждом проходе: источник
+            # помнит её, пока она свежа (``gas.freshness_seconds``), и
+            # отвечает из памяти. При проходе раз в десять секунд это
+            # один запрос в минуту на всю систему, а не по запросу на
+            # комбинацию (``the_main_rules.md``, правило 2 в редакции
+            # 19.09). Котировка остаётся запасным источником.
+            allow_remote_lookup=True,
             source="level1_preliminary",
         )
         gas_rate = await self._gas_conversion_rate(buy_quote, sell_quote, gas=gas)
@@ -110,10 +113,14 @@ class PreliminaryEvaluator:
     ) -> ConversionRate | None:
         """Курс native token сети в валюту расчёта (решение D-4).
 
-        Сначала пробуем вывести курс из уже полученных котировок: часть
-        агрегаторов присылает стоимость газа в долларах, и отдельный
-        запрос курса тогда не нужен. Если вывести нельзя, спрашиваем
-        обычный источник.
+        Сначала спрашиваем обычный источник курса: он кеширует значение,
+        поэтому лишних обращений не создаёт, а отвечает рыночной ценой.
+
+        Курс, выведенный из долларовой цифры агрегатора, остался
+        запасным. Замер 19.09 показал, почему: выведенный курс native
+        token оказался на четверть ниже рыночного. Агрегатор считает
+        свою долларовую цифру по своему курсу и в своих целях, и
+        принимать её за рыночную нельзя.
 
         Отсутствие курса делает стоимость газа неизвестной, а не нулевой:
         подставлять ноль запрещено (``09_PROFIT_CALCULATOR.md`` §16).
@@ -123,6 +130,9 @@ class PreliminaryEvaluator:
         target = self._tokens.get(sell_quote.output_token)
         if native is None or target is None or native.key == target.key:
             return None
+        market = await self._rates.rate(native, target)
+        if market is not None:
+            return market
         quoted = gas_rate_from_quotes(
             gas,
             (buy_quote, sell_quote),
@@ -135,9 +145,7 @@ class PreliminaryEvaluator:
                 buy_quote, sell_quote, correction=self._gas_correction
             ),
         )
-        if quoted is not None:
-            return quoted
-        return await self._rates.rate(native, target)
+        return quoted
 
 
 def _fee_context(quote: Quote) -> FeeContext:

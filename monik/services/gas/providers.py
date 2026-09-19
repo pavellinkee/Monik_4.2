@@ -109,11 +109,30 @@ class RpcGasPriceProvider:
         #: Надбавка по сетям: свойство сети, а не приложения.
         self._priority_fees_wei = dict(priority_fees_wei or {})
         self._timeout = timedelta(seconds=timeout_seconds)
+        #: Последняя known цена по сетям. Пока она свежа, обращения к
+        #: узлу не происходит вовсе: цена газа меняется от блока к блоку
+        #: незначительно, а спрашивать её в каждом проходе значило бы
+        #: тратить запрос на то, что уже известно.
+        self._cache: dict[str, GasPrice] = {}
+
+    def cached_price(self, network_id: NetworkId) -> GasPrice | None:
+        """Известная цена, если она ещё свежа. Запроса не делает.
+
+        Нужна там, где обращаться наружу нельзя, но знание допустимо:
+        запрет на запрос и незнание — разные вещи.
+        """
+        cached = self._cache.get(str(network_id))
+        if cached is None or not cached.is_fresh(self._clock.now()):
+            return None
+        return cached
 
     async def gas_price(self, network_id: NetworkId) -> GasPrice | None:
-        """Запросить цену газа у RPC."""
+        """Цена газа сети: из кеша, пока он свеж, иначе у узла."""
         if not self._endpoints.supports(network_id):
             return None
+        cached = self.cached_price(network_id)
+        if cached is not None:
+            return cached
         payload = await self._call(network_id, "eth_gasPrice")
         legacy = self._parse_quantity(payload, field="eth_gasPrice")
         if legacy is None:
@@ -121,23 +140,32 @@ class RpcGasPriceProvider:
         base_fee = await self._base_fee(network_id)
         now = self._clock.now()
         if base_fee is None:
-            return GasPrice(
+            return self._remember(
+                GasPrice(
+                    network_id=network_id,
+                    wei_per_gas=legacy,
+                    source="rpc:eth_gasPrice",
+                    observed_at=now,
+                    expires_at=now + self._freshness,
+                )
+            )
+        tip = self._priority_fees_wei.get(str(network_id), 0)
+        return self._remember(
+            GasPrice(
                 network_id=network_id,
-                wei_per_gas=legacy,
-                source="rpc:eth_gasPrice",
+                wei_per_gas=base_fee + tip,
+                base_fee_wei=base_fee,
+                priority_fee_wei=tip,
+                source="rpc:eth_feeHistory",
                 observed_at=now,
                 expires_at=now + self._freshness,
             )
-        tip = self._priority_fees_wei.get(str(network_id), 0)
-        return GasPrice(
-            network_id=network_id,
-            wei_per_gas=base_fee + tip,
-            base_fee_wei=base_fee,
-            priority_fee_wei=tip,
-            source="rpc:eth_feeHistory",
-            observed_at=now,
-            expires_at=now + self._freshness,
         )
+
+    def _remember(self, price: GasPrice) -> GasPrice:
+        """Запомнить цену до истечения свежести."""
+        self._cache[str(price.network_id)] = price
+        return price
 
     async def _base_fee(self, network_id: NetworkId) -> int | None:
         """Base fee последнего блока, если сеть поддерживает EIP-1559."""

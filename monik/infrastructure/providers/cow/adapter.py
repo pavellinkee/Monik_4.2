@@ -112,6 +112,12 @@ _TEMPORARY_TYPES = frozenset({"PriceEstimationError", "InternalServerError"})
 #: Ограничение длины диагностики.
 _ERROR_DETAIL_LIMIT = 300
 
+#: Статусы, которыми обычно сообщают об отказе в доступе. У этого
+#: провайдера учётных данных нет вовсе, поэтому «неверный ключ» они
+#: означать не могут: так отвечает пограничный узел, когда закрывает
+#: доступ по частоте обращений.
+_EDGE_REFUSAL_STATUSES = frozenset({401, 403, 429})
+
 #: Состояния заявки в книге и их перевод в общий исход.
 _OUTCOMES: dict[str, OrderOutcome] = {
     "open": OrderOutcome.OPEN,
@@ -620,11 +626,36 @@ class CowAdapter(HttpProviderAdapter):
         return f"cow rejected the order size: {self._error_text(response)}"
 
     def temporary_failure_reason(self, response: HttpResponse) -> str | None:
-        """Перевод собственных неполадок провайдера во временный отказ."""
+        """Перевод собственных неполадок провайдера во временный отказ.
+
+        Отдельно распознаётся отказ пограничного узла. Книга заявок
+        работает без ключа, поэтому 401, 403 и 429 не могут означать
+        отвергнутые учётные данные — их просто нет. Так отвечает защита
+        от частых обращений, и отказ этот **временный**: он снимается
+        сам, когда частота падает. Классифицировать его как ошибку
+        аутентификации значило бы сообщить оператору, что провайдер
+        отверг ключ, которого у нас никогда не было, — и отправить его
+        искать несуществующую причину.
+        """
+        if response.status_code in _EDGE_REFUSAL_STATUSES:
+            return (
+                "cow edge refused the request; the order book needs no credentials, "
+                f"so this is a rate limit rather than an authentication failure "
+                f"({self._edge_detail(response)})"
+            )
         kind = self._error_type(response)
         if kind is None or kind not in _TEMPORARY_TYPES:
             return None
         return f"cow price estimation failed temporarily: {self._error_text(response)}"
+
+    def _edge_detail(self, response: HttpResponse) -> str:
+        """Кто именно отказал: это видно по заголовку ответа."""
+        server = response.headers.get("Server") or response.headers.get("server")
+        return (
+            f"status {response.status_code}, server {server}"
+            if server
+            else (f"status {response.status_code}")
+        )
 
     def error_detail(self, response: HttpResponse) -> str | None:
         """Диагностика неуспешного ответа."""
