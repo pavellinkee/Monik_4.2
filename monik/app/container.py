@@ -47,6 +47,10 @@ from monik.infrastructure.providers.uniswap import UniswapAdapter
 from monik.infrastructure.providers.uniswap import endpoints as uniswap_endpoints
 from monik.infrastructure.providers.velora import VeloraAdapter
 from monik.infrastructure.providers.velora import endpoints as velora_endpoints
+from monik.infrastructure.providers.velora_delta import VeloraDeltaAdapter
+from monik.infrastructure.providers.velora_delta import (
+    endpoints as velora_delta_endpoints,
+)
 from monik.infrastructure.providers.zero_x import ZeroXAdapter
 from monik.infrastructure.providers.zero_x import endpoints as zero_x_endpoints
 from monik.infrastructure.telegram.adapter import TelegramNotificationAdapter
@@ -153,6 +157,7 @@ _DEFAULT_BASE_URLS: dict[ProviderId, str] = {
     ProviderId.UNISWAP: uniswap_endpoints.DEFAULT_BASE_URL,
     ProviderId.KYBERSWAP: kyberswap_endpoints.DEFAULT_BASE_URL,
     ProviderId.COW: cow_endpoints.DEFAULT_BASE_URL,
+    ProviderId.VELORA_DELTA: velora_delta_endpoints.DEFAULT_BASE_URL,
 }
 
 #: Соответствие идентификатора провайдера его адаптеру.
@@ -165,6 +170,7 @@ _ADAPTERS: dict[
         | UniswapAdapter
         | KyberSwapAdapter
         | CowAdapter
+        | VeloraDeltaAdapter
     ],
 ]
 _ADAPTERS = {
@@ -174,6 +180,7 @@ _ADAPTERS = {
     ProviderId.UNISWAP: UniswapAdapter,
     ProviderId.KYBERSWAP: KyberSwapAdapter,
     ProviderId.COW: CowAdapter,
+    ProviderId.VELORA_DELTA: VeloraDeltaAdapter,
 }
 
 

@@ -21,7 +21,9 @@ class TestCredentialRequirement:
     def test_providers_with_keys_still_require_them(self, provider_id: ProviderId) -> None:
         assert requires_credentials(provider_id) is True
 
-    @pytest.mark.parametrize("provider_id", [ProviderId.VELORA, ProviderId.COW])
+    @pytest.mark.parametrize(
+        "provider_id", [ProviderId.VELORA, ProviderId.COW, ProviderId.VELORA_DELTA]
+    )
     def test_public_apis_do_not_require_credentials(self, provider_id: ProviderId) -> None:
         """Публичный API ключа не требует, и выдумывать его не нужно."""
         assert requires_credentials(provider_id) is False

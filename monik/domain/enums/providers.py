@@ -20,6 +20,10 @@ class ProviderId(DomainEnum):
     #: Исполняет подписанные офчейн заявки, а не транзакции
     #: (``the_main_rules.md``, правило 16).
     COW = "cow"
+    #: Интентный продукт Velora: заявку исполняет агент. Отдельный
+    #: провайдер, а не режим Velora Market: у них разные API, разная
+    #: модель исполнения и разная цена (``the_main_rules.md``, правило 18).
+    VELORA_DELTA = "velora_delta"
 
 
 #: Провайдеры, чьи API отдают котировки публично. Ключ им не нужен, и
@@ -29,7 +33,7 @@ class ProviderId(DomainEnum):
 #: Признак объявлен здесь, а не в адаптере: проверка конфигурации
 #: выполняется до того, как адаптеры созданы, и обращаться из неё к
 #: инфраструктуре нельзя.
-_PUBLIC_PROVIDERS = frozenset({ProviderId.VELORA, ProviderId.COW})
+_PUBLIC_PROVIDERS = frozenset({ProviderId.VELORA, ProviderId.COW, ProviderId.VELORA_DELTA})
 
 
 def requires_credentials(provider_id: ProviderId) -> bool:
