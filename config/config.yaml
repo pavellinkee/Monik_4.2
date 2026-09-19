@@ -296,7 +296,7 @@ providers:
 # из символа (01_PROJECT_REQUIREMENTS.md §10).
 tokens:
     # Рабочий набор торгового прохода задан оператором 19.09:
-    # USDT, USDC, DAI. После правила 15 режим ann берёт все включённые
+    # USDT, USDC, USDC.e, DAI, WBTC. После правила 15 режим ann берёт все включённые
     # токены, поэтому остальные выключены явно — иначе они попали бы в
     # торговый проход.
   - network_id: polygon
@@ -326,7 +326,7 @@ tokens:
     usd_stable: true
     # Приостановлен по решению оператора 18.09: торговый проход
     # временно работает одной парой USDT/DAI.
-    enabled: false
+    enabled: true
 
   - network_id: polygon
     address: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
@@ -347,7 +347,7 @@ tokens:
     symbol: WBTC
     decimals: 8
     rank: 6
-    enabled: false
+    enabled: true
 
   - network_id: polygon
     address: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
