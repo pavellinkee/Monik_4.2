@@ -412,3 +412,72 @@ class TestOrderLifetime:
     async def test_a_non_positive_setting_is_refused(self) -> None:
         with pytest.raises(DataError):
             await self._adapter_with("0").build_order(_request())
+
+
+class TestStaleBookkeeping:
+    """Учёт провайдера отстаёт от цепи, и верить ему на слово нельзя.
+
+    19.09 на сделке #T3 заявка осталась в состоянии ``RUNNING`` и после
+    истечения срока: статус провайдер не переписал. Позиция из-за этого
+    зависла бы навсегда, а вместе с ней и резерв средств под неё.
+    """
+
+    @staticmethod
+    def _payload(*, deadline: int, status: str = "RUNNING", transactions: list | None = None):
+        return {
+            "status": status,
+            "transactions": transactions or [],
+            "order": {"deadline": deadline},
+        }
+
+    async def test_an_expired_order_is_expired_whatever_the_book_says(self) -> None:
+        past = int(f.NOW.timestamp()) - 1
+        adapter = _adapter(
+            [HttpResponse(status_code=200, text=json.dumps(self._payload(deadline=past)))]
+        )
+
+        state = await adapter.order_state(f.POLYGON, "uuid", operation=OperationType.BUY)
+
+        assert state.outcome is OrderOutcome.EXPIRED
+        assert state.is_final is True
+
+    async def test_a_live_order_is_still_open(self) -> None:
+        future = int(f.NOW.timestamp()) + 60
+        adapter = _adapter(
+            [HttpResponse(status_code=200, text=json.dumps(self._payload(deadline=future)))]
+        )
+
+        state = await adapter.order_state(f.POLYGON, "uuid", operation=OperationType.BUY)
+
+        assert state.outcome is OrderOutcome.OPEN
+
+    async def test_a_settled_order_counts_as_filled(self) -> None:
+        """Расчёт в цепи весомее записи в книге, даже если та отстаёт."""
+        past = int(f.NOW.timestamp()) - 1
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=200,
+                    text=json.dumps(self._payload(deadline=past, transactions=[{"hash": "0xabc"}])),
+                )
+            ]
+        )
+
+        state = await adapter.order_state(f.POLYGON, "uuid", operation=OperationType.BUY)
+
+        assert state.outcome is OrderOutcome.FILLED
+
+    async def test_a_final_status_is_never_second_guessed(self) -> None:
+        future = int(f.NOW.timestamp()) + 60
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=200,
+                    text=json.dumps(self._payload(deadline=future, status="EXECUTED")),
+                )
+            ]
+        )
+
+        state = await adapter.order_state(f.POLYGON, "uuid", operation=OperationType.BUY)
+
+        assert state.outcome is OrderOutcome.FILLED

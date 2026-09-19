@@ -555,10 +555,47 @@ class VeloraDeltaAdapter(HttpProviderAdapter):
                 provider_code=_PROVIDER.value,
             )
         return OrderState(
-            outcome=outcome,
+            outcome=self._settle_stale(payload, outcome),
             executed_input_raw=self._executed(payload, "executedSrcAmount"),
             executed_output_raw=self._executed(payload, "executedDestAmount"),
         )
+
+    def _settle_stale(self, payload: dict[str, Any], reported: OrderOutcome) -> OrderOutcome:
+        """Уточнить исход, когда учёт провайдера отстаёт от цепи.
+
+        19.09 на сделке ``#T3`` заявка осталась в состоянии ``RUNNING``
+        и после истечения своего срока: провайдер не переписал статус.
+        Верить ему на слово нельзя — позиция зависла бы навсегда, а
+        вместе с ней и резерв средств под неё.
+
+        Источник истины здесь — не учёт провайдера, а то, что проверяет
+        контракт. Срок заявки в него зашит: после него расчёт невозможен,
+        сколько бы ни говорила книга. А состоявшийся расчёт виден
+        списком транзакций — он либо есть, либо нет.
+        """
+        if reported.is_final:
+            return reported
+        if payload.get("transactions"):
+            # Расчёт состоялся, а статус ещё не переписан. Факт цепи
+            # весомее записи в книге.
+            return OrderOutcome.FILLED
+        if self._deadline_passed(payload):
+            return OrderOutcome.EXPIRED
+        return reported
+
+    def _deadline_passed(self, payload: dict[str, Any]) -> bool:
+        """Истёк ли срок, зашитый в саму заявку."""
+        order = payload.get("order")
+        if not isinstance(order, dict):
+            return False
+        deadline = order.get("deadline")
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, str)):
+            return False
+        try:
+            moment = int(deadline)
+        except ValueError:
+            return False
+        return moment <= int(self._clock.now().timestamp())
 
     @staticmethod
     def _executed(payload: dict[str, Any], field: str) -> int:
