@@ -648,6 +648,30 @@ async def _update_action(container: Container) -> str | None:
     return action_callback_data(CommandName.SYSTEM_UPDATE)
 
 
+def _search_allowed(container: Container, mode: ScanMode) -> bool:
+    """Идёт ли поиск в этом режиме прямо сейчас.
+
+    Правило касается только торгового прохода: ``ur`` и ``fest`` ничего
+    не исполняют, и торговый выключатель к ним отношения не имеет
+    (``the_main_rules.md``, правило 11 — режимы независимы).
+
+    Когда торговля **запрещена конфигурацией**, проход остаётся сухим:
+    он ищет и записывает находки, не тратя денег. Это прямо разрешено
+    правилом 11 — «можно искать, не торгуя», — и ломать его нельзя.
+
+    Когда торговля **разрешена конфигурацией**, поиск следует за
+    выключателем оператора: остановив торговлю, он останавливает и
+    поиск. Иначе система продолжала бы опрашивать агрегаторов ради
+    находок, которые заведомо никуда не пойдут.
+    """
+    if mode is not ScanMode.ANN:
+        return True
+    switch = container.trading
+    if switch is None or not switch.allowed:
+        return True
+    return switch.is_open
+
+
 def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
     """Проход Level 1 в заданном режиме.
 
@@ -663,6 +687,16 @@ def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
             _LOGGER.info(
                 "scan skipped",
                 extra=log_fields(mode=mode.value, state=container.control.state().value),
+            )
+            return
+        if not _search_allowed(container, mode):
+            # Торговый проход следует за выключателем торговли: оператор,
+            # остановивший торговлю, остановил и поиск. Искать то, что
+            # заведомо не будет исполнено, значит тратить квоту
+            # агрегаторов и держать их под нагрузкой впустую.
+            _LOGGER.info(
+                "scan skipped: trading is stopped",
+                extra=log_fields(mode=mode.value),
             )
             return
         if not container.level1.has_active_providers():
