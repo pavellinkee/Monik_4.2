@@ -202,10 +202,13 @@ providers:
     allow_same_provider_round_trip: true
     api_key: { env: "MONIK_UNISWAP_API_KEY" }
     requests_per_second: 4.9
-    # Часы работы. Вне окна агрегатор не опрашивается вовсе.
-    schedule:
-      start: "04:00"
-      end: "23:00"
+    # Расписание снято 19.09 по решению оператора. Окно 04:00-23:00
+    # ставилось под суточную квоту Velora и к Uniswap по смыслу не
+    # относилось: ключ у него платный, суточной квоты нет. В ночь на
+    # 20.09 окно закрылось, и торговый проход остался с одним CoW Swap —
+    # три комбинации вместо двенадцати, порог при этом недостижим:
+    # выбросы ловятся расхождением между двумя источниками цены, а не
+    # внутри одного.
     supported_networks: [polygon, arbitrum]
     ui_urls:
       polygon: "https://app.uniswap.org/swap?chain=polygon"
