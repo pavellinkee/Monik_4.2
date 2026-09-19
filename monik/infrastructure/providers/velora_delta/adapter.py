@@ -70,6 +70,21 @@ _PROVIDER = ProviderId.VELORA_DELTA
 #: Адрес счёта, от имени которого составляется и подписывается заявка.
 OPTION_SWAPPER = "swapper"
 
+#: Опция срока жизни заявки, в секундах.
+OPTION_VALIDITY = "order_validity_seconds"
+
+#: Срок жизни заявки по умолчанию. Задаётся **абсолютным временем**:
+#: проверено живым API 19.09 — параметр ``deadline`` принимается и
+#: соблюдается, а ``expiry`` и ``validFor`` молча игнорируются, оставляя
+#: час по умолчанию.
+#:
+#: Срок здесь — это не только время жизни заявки, но и **срок
+#: резервирования средств**: пока заявка жива, её сумма считается
+#: занятой, иначе вторую заявку можно было бы подписать на те же деньги.
+#: Часовой срок по умолчанию запирал капитал на час ради намерения,
+#: которое ловит расхождение длиной в минуты.
+DEFAULT_VALIDITY_SECONDS = 10
+
 #: Маршрут Delta не раскрывает: цену назначает агент, а не путь по пулам.
 _SUPPORTS_FIXED_ROUTE = False
 
@@ -214,6 +229,9 @@ class VeloraDeltaAdapter(HttpProviderAdapter):
                 # Базисные пункты: проверено сравнением предела заявки с
                 # обещанием котировки.
                 "slippage": request.slippage_bps,
+                # Абсолютное время: относительные параметры провайдер
+                # принимает, но не соблюдает.
+                "deadline": int(self._clock.now().timestamp()) + self._validity_seconds(),
             },
             priority=request.priority,
             correlation_id=request.correlation_id,
@@ -549,6 +567,28 @@ class VeloraDeltaAdapter(HttpProviderAdapter):
         if value is None:
             return 0
         return parse_base_units(value, provider=_PROVIDER, field=field)
+
+    def _validity_seconds(self) -> int:
+        """Сколько живёт заявка и, вместе с ней, резерв средств."""
+        configured = self._config.option(OPTION_VALIDITY)
+        if configured is None:
+            return DEFAULT_VALIDITY_SECONDS
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            raise DataError(
+                f"providers[velora_delta].options.{OPTION_VALIDITY} "
+                "is not a whole number of seconds",
+                code="provider_option_invalid",
+                provider_code=_PROVIDER.value,
+            ) from None
+        if value <= 0:
+            raise DataError(
+                f"providers[velora_delta].options.{OPTION_VALIDITY} must be positive",
+                code="provider_option_invalid",
+                provider_code=_PROVIDER.value,
+            )
+        return value
 
     def _require_swapper(self) -> str:
         """Адрес, от имени которого составляется заявка."""

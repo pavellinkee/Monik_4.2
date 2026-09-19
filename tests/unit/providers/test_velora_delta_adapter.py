@@ -354,3 +354,61 @@ class TestObservedStatus:
         assert state.outcome is OrderOutcome.OPEN
         assert state.is_final is False
         assert state.executed_output_raw == 0
+
+
+class TestOrderLifetime:
+    """Срок заявки — он же срок резервирования средств.
+
+    Пока заявка жива, её сумма считается занятой: иначе вторую заявку
+    можно было бы подписать на те же деньги. Час по умолчанию запер
+    100 USDT на сделке #T3 19.09 и остановил торговлю целиком.
+    """
+
+    @staticmethod
+    def _adapter_with(validity: str | None) -> VeloraDeltaAdapter:
+        options = {"swapper": SWAPPER}
+        if validity is not None:
+            options["order_validity_seconds"] = validity
+        return _adapter(
+            [
+                HttpResponse(status_code=200, text=json.dumps(PRICE_PAYLOAD)),
+                HttpResponse(status_code=200, text=json.dumps(_built())),
+            ],
+            options=options,
+        )
+
+    async def test_the_deadline_is_absolute_and_ours(self) -> None:
+        """Относительные параметры провайдер принимает, но не соблюдает.
+
+        Проверено живым API 19.09: ``expiry`` и ``validFor`` молча
+        оставляют час, работает только ``deadline`` абсолютным временем.
+        """
+        http = FakeHttpClient(
+            [
+                HttpResponse(status_code=200, text=json.dumps(PRICE_PAYLOAD)),
+                HttpResponse(status_code=200, text=json.dumps(_built())),
+            ]
+        )
+        adapter = VeloraDeltaAdapter(
+            provider_config(
+                ProviderId.VELORA_DELTA,
+                options={"swapper": SWAPPER, "order_validity_seconds": "10"},
+            ),
+            http=http,
+            resources=resource_manager(FakeClock(f.NOW)),
+            clock=FakeClock(f.NOW),
+        )
+        await adapter.build_order(_request())
+
+        body = http.calls[1].request.json_body
+        assert body["deadline"] == int(f.NOW.timestamp()) + 10
+        assert "expiry" not in body
+        assert "validFor" not in body
+
+    async def test_a_broken_setting_is_refused(self) -> None:
+        with pytest.raises(DataError):
+            await self._adapter_with("через час").build_order(_request())
+
+    async def test_a_non_positive_setting_is_refused(self) -> None:
+        with pytest.raises(DataError):
+            await self._adapter_with("0").build_order(_request())
