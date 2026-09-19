@@ -296,7 +296,7 @@ providers:
 # из символа (01_PROJECT_REQUIREMENTS.md §10).
 tokens:
     # Рабочий набор торгового прохода задан оператором 19.09:
-    # USDT, USDC, USDC.e, DAI, WBTC. После правила 15 режим ann берёт все включённые
+    # USDT, USDC, DAI, WBTC. После правила 15 режим ann берёт все включённые
     # токены, поэтому остальные выключены явно — иначе они попали бы в
     # торговый проход.
   - network_id: polygon
@@ -324,9 +324,9 @@ tokens:
     rank: 3
     # Мостовой USDC на Polygon — такой же долларовый стейблкоин, как USDC.
     usd_stable: true
-    # Приостановлен по решению оператора 18.09: торговый проход
-    # временно работает одной парой USDT/DAI.
-    enabled: true
+    # Выключен 19.09 по решению оператора. CoW Swap отвечал на него
+    # NoRouteError — исполнить круг через него было бы нечем.
+    enabled: false
 
   - network_id: polygon
     address: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
