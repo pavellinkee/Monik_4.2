@@ -119,6 +119,10 @@ _ERROR_DETAIL_LIMIT = 300
 _OUTCOMES: dict[str, OrderOutcome] = {
     "PENDING": OrderOutcome.OPEN,
     "ACCEPTED": OrderOutcome.OPEN,
+    #: Заявка принята, но агенты её ещё не рассматривали. Наблюдено
+    #: 19.09 на сделке #T3 вместе с RUNNING: провайдер различает «ещё не
+    #: начали» и «идёт работа», для нас оба означают «исход неизвестен».
+    "NOT_STARTED": OrderOutcome.OPEN,
     "RUNNING": OrderOutcome.OPEN,
     "EXECUTING": OrderOutcome.OPEN,
     "EXECUTED": OrderOutcome.FILLED,

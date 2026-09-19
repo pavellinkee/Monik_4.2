@@ -568,10 +568,20 @@ class TradeExecutor:
                 }
             )
             await self._positions.update(updated)
-            _LOGGER.warning(
-                "trade failed: the buy transaction reverted",
-                extra=log_fields(t_id=str(position.t_id), tx=position.buy_tx_hash or ""),
-            )
+            # Формулировка зависит от того, чем шла нога. У намерения
+            # нет транзакции, и откатываться нечему: заявку просто не
+            # взяли. Сказать «транзакция откатилась» значило бы послать
+            # оператора искать в цепи то, чего там никогда не было.
+            if position.buy_order_uid is not None:
+                _LOGGER.info(
+                    "trade closed without a buy: the order was not filled",
+                    extra=log_fields(t_id=str(position.t_id), order=position.buy_order_uid),
+                )
+            else:
+                _LOGGER.warning(
+                    "trade failed: the buy transaction reverted",
+                    extra=log_fields(t_id=str(position.t_id), tx=position.buy_tx_hash or ""),
+                )
             return updated
         after = await self._account.token_balance(position.target_token, priority=_PRIORITY)
         acquired = after.raw - (position.raw_target_before_buy or 0)

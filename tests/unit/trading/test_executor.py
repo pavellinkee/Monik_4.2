@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
+import pytest
 from eth_account import Account
 
 from monik.config import parse_configuration
@@ -759,3 +761,37 @@ class TestOrderExecution:
         )
 
         assert positions.items == {}
+
+
+class TestFailureWording:
+    """Неудача ноги-намерения — не откат транзакции.
+
+    У намерения транзакции нет, и откатываться нечему: заявку просто не
+    взяли. Сообщение об откате послало бы оператора искать в цепи то,
+    чего там никогда не было. Наблюдено на сделке #T4 19.09.
+    """
+
+    async def test_an_unfilled_order_is_not_called_a_revert(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, _ = _order_executor(node, positions, outcome=OrderOutcome.EXPIRED)
+
+        with caplog.at_level(logging.INFO):
+            await executor.consider(
+                (
+                    _result(
+                        _candidate(
+                            100_000_000,
+                            "0.20",
+                            buy_provider=ProviderId.COW,
+                            sell_provider=ProviderId.COW,
+                        )
+                    ),
+                )
+            )
+
+        messages = [record.message for record in caplog.records]
+        assert "trade closed without a buy: the order was not filled" in messages
+        assert "trade failed: the buy transaction reverted" not in messages
