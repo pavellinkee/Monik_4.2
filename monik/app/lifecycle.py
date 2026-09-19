@@ -66,6 +66,7 @@ __all__ = [
     "scan_task_name",
     "TASK_NOTIFICATIONS",
     "TASK_POSITIONS",
+    "TASK_TRADE_REPORT",
     "TASK_BACKUP",
     "TASK_SYSTEM_HEALTH",
     "TASK_SYSTEM_UPDATES",
@@ -97,6 +98,7 @@ def scan_task_name(mode: ScanMode) -> str:
 
 TASK_NOTIFICATIONS = "notification_delivery"
 TASK_POSITIONS = "position_watch"
+TASK_TRADE_REPORT = "trade_report"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
 TASK_CAPABILITY_LOAD = "capability_load"
 TASK_TOKEN_CHECK = "token_check"
@@ -483,6 +485,18 @@ def build_application(
             # берётся у режима возможности, а не отсюда.
             priority=RequestPriority.UR_LEVEL2,
         )
+    if container.reporter is not None:
+        # Отчёт проверяется чаще, чем отправляется: он сам решает, истёк
+        # ли промежуток. Иначе такт планировщика и период отчёта
+        # пришлось бы держать равными, и период перестал бы быть
+        # настройкой оператора.
+        registry.register(
+            TASK_TRADE_REPORT,
+            _trade_report_task(container),
+            config=config.scheduler,
+            default=TaskScheduleConfig(mode=TaskMode.INTERVAL, interval_seconds=30),
+            priority=RequestPriority.BACKGROUND,
+        )
     registry.register(
         TASK_NOTIFICATIONS,
         _notification_task(container),
@@ -674,6 +688,18 @@ def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
             ApplicationHealthStatus.HEALTHY,
             reason=f"последний цикл {container.clock.now().isoformat(timespec='seconds')}",
         )
+
+    return run
+
+
+def _trade_report_task(container: Container) -> TaskHandler:
+    """Периодический отчёт оператору о работе торгового прохода."""
+
+    async def run() -> None:
+        reporter = container.reporter
+        if reporter is None:
+            return
+        await reporter.tick()
 
     return run
 

@@ -106,6 +106,11 @@ class TradingConfig(ConfigSection):
     order_poll_seconds: int = Field(default=3, ge=1, le=60)
     order_timeout_seconds: int = Field(default=300, ge=10, le=3600)
 
+    #: Периодический отчёт оператору в Telegram. Выключен по
+    #: умолчанию: отчёт — это сообщения человеку, и включать их за него
+    #: нельзя.
+    report_enabled: bool = False
+
     #: Период отчёта о сделках в Telegram.
     report_interval_seconds: int = Field(default=1_800, ge=60, le=86_400)
 

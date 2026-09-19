@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
+from decimal import Decimal
 from urllib.parse import urlsplit
 
 from monik import version_label
@@ -27,6 +28,7 @@ from monik.domain.enums.lifecycle import AmountConfirmationStatus
 from monik.domain.enums.modes import ScanMode
 from monik.domain.enums.notifications import DestinationKind
 from monik.domain.enums.providers import ProviderId
+from monik.domain.enums.resources import RequestPriority
 from monik.domain.errors import ConfigurationError
 from monik.domain.models.job import ConfirmationResult
 from monik.domain.models.notification import NotificationDestination
@@ -139,6 +141,7 @@ from monik.services.trading import (
 )
 from monik.services.trading.costs import GasCostConverter
 from monik.services.trading.orders import SignedOrderRunner
+from monik.services.trading.reporting import TradeReporter
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
 __all__ = ["Container", "Repositories", "build_container"]
@@ -234,6 +237,7 @@ class Container:
     trading: TradingSwitch | None = None
     executor: TradeExecutor | None = None
     watcher: PositionWatcher | None = None
+    reporter: TradeReporter | None = None
 
     async def aclose(self) -> None:
         """Освободить внешние ресурсы."""
@@ -451,8 +455,11 @@ def build_container(
     trading_switch = TradingSwitch(allowed=config.trading.execution_enabled)
     executor: TradeExecutor | None = None
     watcher: PositionWatcher | None = None
+    reporter: TradeReporter | None = None
+    # Хранилище сделок нужно и без кошелька: отчёт показывает прошлое,
+    # даже когда торговать нечем.
+    positions_store = SqlitePositionRepository(database)
     if wallet is not None and chain_account is not None:
-        positions_store = SqlitePositionRepository(database)
         sender = TransactionSender(
             wallet=wallet,
             account=chain_account,
@@ -553,6 +560,17 @@ def build_container(
     system_notifier = _build_system_notifier(
         loaded, telegram=telegram, repositories=repositories, clock=clock
     )
+    reporter = _build_reporter(
+        config,
+        positions=positions_store,
+        scans=repositories.scans,
+        notifier=system_notifier,
+        switch=trading_switch,
+        account=chain_account,
+        tokens=tokens,
+        networks=networks,
+        clock=clock,
+    )
 
     return Container(
         configuration=config,
@@ -592,6 +610,7 @@ def build_container(
         trading=trading_switch,
         executor=executor,
         watcher=watcher,
+        reporter=reporter,
     )
 
 
@@ -1236,6 +1255,46 @@ class _MetricsStatsSource:
 
     def _confirmations(self, status: AmountConfirmationStatus) -> int:
         return self._metrics.counter(names.LEVEL2_CONFIRMATIONS, status=status.value)
+
+
+def _build_reporter(
+    config: Configuration,
+    *,
+    positions: SqlitePositionRepository,
+    scans: SqliteScanRepository,
+    notifier: SystemNotifier | None,
+    switch: TradingSwitch,
+    account: ChainAccount | None,
+    tokens: TokenRegistry,
+    networks: NetworkRegistry,
+    clock: Clock,
+) -> TradeReporter | None:
+    """Периодический отчёт оператору, если он включён.
+
+    Без канала сообщений отчёта не бывает: писать его некуда.
+    """
+    if not config.trading.report_enabled or notifier is None:
+        return None
+    enabled = networks.enabled()
+    base = tokens.base_token(enabled[0].network_id) if enabled else None
+
+    async def balance() -> tuple[Decimal, str] | None:
+        """Остаток базового токена. Один запрос за отчётный промежуток."""
+        if base is None or account is None:
+            return None
+        amount = await account.token_balance(base, priority=RequestPriority.BACKGROUND)
+        return amount.as_decimal, str(base.symbol)
+
+    return TradeReporter(
+        positions=positions,
+        scans=scans,
+        notify=notifier,
+        clock=clock,
+        interval_seconds=config.trading.report_interval_seconds,
+        trading_state=switch.state,
+        threshold_percent=config.profitability.threshold_for(ScanMode.ANN),
+        balance=balance,
+    )
 
 
 def _build_wallet(loaded: LoadedConfiguration) -> TradingWallet | None:

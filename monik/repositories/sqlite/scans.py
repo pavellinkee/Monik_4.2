@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from decimal import Decimal
+
 import aiosqlite
 
 from monik.domain.enums.lifecycle import ScanStatus
-from monik.domain.models.scan import Scan, ScanScope, ScanStatistics
+from monik.domain.models.scan import Scan, ScanScope, ScanStatistics, ScanSummary
 from monik.domain.value_objects.identifiers import ScanId
 from monik.domain.value_objects.timestamps import UtcDatetime
 from monik.infrastructure.db.connection import Database
@@ -64,6 +67,25 @@ class SqliteScanRepository:
         )
         return tuple(self._to_domain(row) for row in rows)
 
+    async def summary_between(self, *, since: UtcDatetime, until: UtcDatetime) -> ScanSummary:
+        """Сводка проходов за промежуток: сколько и какой был лучший.
+
+        Лучшая доходность не вычисляется заново, а берётся из записи
+        прохода: там лежит ровно то число, по которому принималось
+        решение. Пересчёт здесь завёл бы вторую арифметику рядом с той.
+        """
+        rows = await self._database.fetch_all(
+            "SELECT statistics_json FROM scans WHERE finished_at IS NOT NULL "
+            "AND finished_at >= ? AND finished_at < ?",
+            (to_timestamp(since), to_timestamp(until)),
+        )
+        best: Decimal | None = None
+        for row in rows:
+            value = _best_net_roi(column(row, "statistics_json"))
+            if value is not None and (best is None or value > best):
+                best = value
+        return ScanSummary(passes=len(rows), best_net_roi=best)
+
     async def delete_finished_before(self, moment: UtcDatetime) -> int:
         """Удалить завершённые циклы старше указанного момента.
 
@@ -105,3 +127,32 @@ class SqliteScanRepository:
             started_at=from_timestamp(str(column(row, "started_at"))),
             finished_at=from_timestamp(str(finished_at)) if finished_at else None,
         )
+
+
+def _best_net_roi(raw: object) -> Decimal | None:
+    """Лучшая чистая доходность из статистики прохода.
+
+    Статистика хранится как есть, одной записью, и разбирать её здесь —
+    работа отображения, а не вычисление. Повреждённая или неполная
+    запись не мешает отчёту: такой проход просто не участвует в
+    сравнении.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    best = payload.get("best_combination")
+    if not isinstance(best, dict):
+        return None
+    roi = best.get("net_roi")
+    value = roi.get("value") if isinstance(roi, dict) else roi
+    if not isinstance(value, (str, int)):
+        return None
+    try:
+        return Decimal(str(value))
+    except ArithmeticError:
+        return None

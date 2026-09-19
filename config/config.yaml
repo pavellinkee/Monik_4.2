@@ -659,6 +659,8 @@ trading:
   max_wait_notice_enabled: true
   max_wait_notice_seconds: 7200
   approve_unlimited: true
+  # Отчёт раз в полчаса по решению оператора 19.09.
+  report_enabled: true
   report_interval_seconds: 1800
 
 fees:

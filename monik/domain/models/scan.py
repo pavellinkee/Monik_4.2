@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Self
 
 from pydantic import Field, model_validator
@@ -149,3 +150,18 @@ class Scan(DomainModel):
         if self.status is not ScanStatus.RUNNING and self.finished_at is None:
             raise ValueError(f"scan in status {self.status.value} must have finished_at")
         return self
+
+
+class ScanSummary(DomainModel):
+    """Чем закончились проходы за промежуток.
+
+    Сводка, а не статистика цикла: она отвечает на вопрос оператора
+    «сколько искали и насколько близко подошли», и потому живёт рядом с
+    самим проходом, а не в том, кто её показывает.
+    """
+
+    passes: int = Field(ge=0)
+    #: Лучшая чистая доходность за промежуток. ``None`` — проходов не
+    #: было либо ни один не дал сравнимого результата; нулём это не
+    #: заменяется (``CLAUDE.md`` §12).
+    best_net_roi: Decimal | None = None
