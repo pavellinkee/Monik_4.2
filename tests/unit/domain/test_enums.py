@@ -25,10 +25,11 @@ from monik.domain.enums.resources import confirmation_priority, search_priority
 
 #: Значения, зафиксированные архитектурой. Изменять только вместе с migration.
 FROZEN_VALUES: dict[str, set[str]] = {
-    # KyberSwap добавлен решением оператора (``the_main_rules.md``,
-    # правило 9): архитектурный §3 перечисляет четырёх провайдеров, набор
-    # расширен сознательно и записан как источник истины.
-    "ProviderId": {"oneinch", "zero_x", "velora", "uniswap", "kyberswap"},
+    # KyberSwap и CoW Swap добавлены решениями оператора
+    # (``the_main_rules.md``, правила 9 и 16): архитектурный §3
+    # перечисляет четырёх провайдеров, набор расширен сознательно и
+    # каждое расширение записано как источник истины.
+    "ProviderId": {"oneinch", "zero_x", "velora", "uniswap", "kyberswap", "cow"},
     "OperationType": {"buy", "sell"},
     "JobStatus": {
         "queued",
@@ -85,10 +86,10 @@ def test_is_serializable_as_plain_string(enum_type: type[DomainEnum]) -> None:
 
 
 def test_provider_set_matches_approved_providers() -> None:
-    """Набор провайдеров утверждён: ``01 §3`` плюс правило 9.
+    """Набор провайдеров утверждён: ``01 §3`` плюс правила 9 и 16.
 
-    Архитектурный документ перечисляет четырёх провайдеров. KyberSwap
-    добавлен отдельным решением оператора, записанным в
+    Архитектурный документ перечисляет четырёх провайдеров. KyberSwap и
+    CoW Swap добавлены отдельными решениями оператора, записанными в
     ``the_main_rules.md``; набор по-прежнему закрыт и не расширяется
     свободно.
     """
@@ -98,6 +99,7 @@ def test_provider_set_matches_approved_providers() -> None:
         "velora",
         "uniswap",
         "kyberswap",
+        "cow",
     }
 
 

@@ -17,3 +17,6 @@ class ProviderId(DomainEnum):
     VELORA = "velora"
     UNISWAP = "uniswap"
     KYBERSWAP = "kyberswap"
+    #: Исполняет подписанные офчейн заявки, а не транзакции
+    #: (``the_main_rules.md``, правило 16).
+    COW = "cow"
