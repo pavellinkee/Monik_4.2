@@ -81,6 +81,10 @@ class FakeAdapter:
         self.quote_calls: list[QuoteRequest] = []
         #: Размещённые заявки и их состояния. Тест задаёт, чем кончится
         #: каждая: исполнением, истечением срока или ожиданием.
+        #: Отказ книги именно на размещении. Отдельный от общего
+        #: ``error``: тот валит и котировку, а проверять надо путь,
+        #: где находка подтвердилась, а отправить её не удалось.
+        self.place_error: MonikError | None = None
         self.placed_orders: list[PlacedOrder] = []
         self.order_outcomes: dict[str, OrderState] = {}
         self.default_order_outcome = OrderState(
@@ -167,6 +171,8 @@ class FakeAdapter:
         self, plan: SignedOrderPlan, signature: str, *, request_id: RequestId | None = None
     ) -> PlacedOrder:
         """Принять подставную заявку."""
+        if self.place_error is not None:
+            raise self.place_error
         if self._error is not None:
             raise self._error
         placed = PlacedOrder(

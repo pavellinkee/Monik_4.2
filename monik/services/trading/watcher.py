@@ -181,6 +181,18 @@ class PositionWatcher:
             await self._settle_pending_buy_order(position)
             return
         if position.buy_tx_hash is None:
+            # Ни транзакции, ни заявки: покупка не начиналась вовсе.
+            # Запись о сделке создаётся **до** отправки, чтобы перезапуск
+            # не потерял отправленное, — и если отправить не удалось, а
+            # процесс на этом прервался, запись остаётся без единого
+            # опознавательного знака. Довести её нечем, а держать в
+            # BUYING нельзя: она вечно занимает сумму, которой не
+            # тратила. Закрываем как несостоявшуюся — деньги на месте.
+            _LOGGER.warning(
+                "trade closed without a buy: nothing was ever sent",
+                extra=log_fields(t_id=str(position.t_id)),
+            )
+            await self._executor.settle_buy(position, succeeded=False)
             return
         # Подбор покупки — работа покупки, а не продажи: приоритет тот же,
         # с которым эта транзакция отправлялась.

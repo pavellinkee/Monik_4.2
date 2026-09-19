@@ -742,3 +742,33 @@ class TestOrderExit:
         assert waiting.status is PositionStatus.HOLDING
         assert waiting.sell_order_uid is None
         assert waiting.closed_at is None
+
+
+class TestNeverStartedBuy:
+    """Покупка, которая не начиналась, не должна держать деньги.
+
+    Запись о сделке создаётся до отправки, чтобы перезапуск не потерял
+    отправленное. Если отправить не удалось, запись остаётся без единого
+    опознавательного знака — ни хеша, ни идентификатора заявки. Довести
+    её нечем, а в BUYING она вечно занимает сумму, которой не тратила.
+    Так встала сделка #T15 19.09.
+    """
+
+    async def test_a_position_without_any_identifier_is_closed(self) -> None:
+        node = ScriptedNode(balances={str(f.USDT.address).lower(): 0})
+        positions = MemoryPositions()
+        position = _position(
+            status=PositionStatus.BUYING,
+            raw_acquired=None,
+            buy_tx_hash=None,
+            buy_order_uid=None,
+        )
+        await positions.create(position)
+        watcher = _watcher(node, positions)
+
+        await watcher.tick()
+
+        settled = positions.items[str(position.t_id)]
+        assert settled.status is PositionStatus.FAILED
+        assert settled.raw_returned == settled.raw_input
+        assert settled.closed_at is not None

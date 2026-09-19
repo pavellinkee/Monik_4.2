@@ -504,7 +504,25 @@ class TradeExecutor:
         """
         if self._orders is None:  # pragma: no cover - проверено выше
             return None
-        placed = await self._orders.place(adapter, plan)
+        try:
+            placed = await self._orders.place(adapter, plan)
+        except Exception as error:  # noqa: BLE001 - отказ книги не сбой системы
+            # Запись о сделке уже создана — она делается до отправки,
+            # чтобы перезапуск не потерял отправленное. Если отправить
+            # не удалось, запись обязана закрыться здесь же: иначе она
+            # останется в BUYING навсегда, держа сумму занятой, и
+            # опознать её будет нечем — ни хеша, ни идентификатора
+            # заявки у неё нет. Так и встала сделка #T15 19.09.
+            _LOGGER.warning(
+                "trade cancelled: the order could not be placed",
+                extra=self._describe(choice)
+                | {
+                    "t_id": str(position.t_id),
+                    "error": type(error).__name__,
+                    "detail": str(error),
+                },
+            )
+            return await self.settle_buy(position, succeeded=False)
         position = position.model_copy(
             update={
                 "buy_order_uid": placed.uid,

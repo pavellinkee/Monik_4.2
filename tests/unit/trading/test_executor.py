@@ -809,3 +809,39 @@ class TestFailureWording:
         messages = [record.getMessage() for record in records]
         assert "trade closed without a buy: the order was not filled" in messages
         assert "trade failed: the buy transaction reverted" not in messages
+
+
+class TestPlacementFailure:
+    """Отказ книги не должен ронять проход и бросать запись о сделке.
+
+    19.09 на сделке #T15 книга отвергла заявку, исключение вышло наружу,
+    проход упал целиком, а запись осталась в BUYING без единого
+    опознавательного знака и держала сумму занятой.
+    """
+
+    async def test_a_rejected_order_closes_the_trade(self) -> None:
+        from monik.domain.errors import DataError
+
+        node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+        positions = MemoryPositions()
+        executor, adapter = _order_executor(node, positions)
+        adapter.place_error = DataError("order book rejected the order", code="order_rejected")
+
+        await executor.consider(
+            (
+                _result(
+                    _candidate(
+                        100_000_000,
+                        "0.20",
+                        buy_provider=ProviderId.COW,
+                        sell_provider=ProviderId.COW,
+                    )
+                ),
+            )
+        )
+
+        assert len(positions.items) == 1
+        settled = next(iter(positions.items.values()))
+        assert settled.status is PositionStatus.FAILED
+        assert settled.raw_returned == settled.raw_input
+        assert settled.closed_at is not None
