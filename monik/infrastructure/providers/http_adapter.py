@@ -18,6 +18,7 @@ from typing import Any
 from monik.config.secrets import SecretValue
 from monik.config.sections.providers import ProviderConfig
 from monik.domain.enums.capability import CapabilityOperation
+from monik.domain.enums.errors import Retryability
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
@@ -224,6 +225,24 @@ class HttpProviderAdapter:
         """
         return None
 
+    def temporary_failure_is_retryable(self, response: HttpResponse) -> bool:
+        """Стоит ли повторять запрос после временного отказа.
+
+        По умолчанию да: временный сбой провайдера на то и временный.
+
+        Но не всякий временный отказ стоит повторять **сейчас**. Отказ по
+        частоте обращений повтором не лечится — он им усугубляется: мы
+        добавляем нагрузку ровно тому, кто уже попросил нас её снизить.
+        Хуже того, повторы съедают срок прохода, и из-за одного
+        закрывшегося провайдера падает весь цикл — вместе с теми, кто
+        отвечает исправно.
+
+        Отказ при этом остаётся временным для здоровья: circuit breaker
+        его учитывает и сам отступает, а когда провайдер отпустит,
+        пробный запрос это обнаружит.
+        """
+        return True
+
     def redact_provider_text(self, text: str) -> str:
         """Скрыть секреты в тексте, полученном от провайдера.
 
@@ -367,6 +386,11 @@ class HttpProviderAdapter:
                         provider_code=self._provider_id.value,
                         http_status=response.status_code,
                         request_id=response.request_id,
+                        retryability=(
+                            Retryability.CONDITIONAL
+                            if self.temporary_failure_is_retryable(response)
+                            else Retryability.NON_RETRYABLE
+                        ),
                     )
             classify_response(
                 response,

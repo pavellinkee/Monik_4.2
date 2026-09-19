@@ -648,6 +648,15 @@ class CowAdapter(HttpProviderAdapter):
             return None
         return f"cow price estimation failed temporarily: {self._error_text(response)}"
 
+    def temporary_failure_is_retryable(self, response: HttpResponse) -> bool:
+        """Отказ по частоте обращений повтором не лечится.
+
+        Повторять его — значит добавлять нагрузку тому, кто уже закрыл
+        доступ, и одновременно тратить срок прохода: 19.09 три таких
+        повтора уронили весь цикл вместе с исправным Uniswap.
+        """
+        return response.status_code not in _EDGE_REFUSAL_STATUSES
+
     def _edge_detail(self, response: HttpResponse) -> str:
         """Кто именно отказал: это видно по заголовку ответа."""
         server = response.headers.get("Server") or response.headers.get("server")

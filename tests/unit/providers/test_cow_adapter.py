@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from monik.domain.enums.errors import Retryability
 from monik.domain.enums.operations import OperationType
 from monik.domain.enums.providers import ProviderId
 from monik.domain.errors import (
@@ -395,3 +396,50 @@ class TestEdgeRefusal:
             await adapter.get_quote(_request())
 
         assert "CloudFront" in str(refusal.value)
+
+
+class TestRefusalIsNotRetried:
+    """Отказ по частоте обращений повтором не лечится.
+
+    19.09 три повтора подряд уронили весь проход вместе с исправным
+    Uniswap: повторы съели срок цикла. И сам повтор вреден — он
+    добавляет нагрузку тому, кто уже закрыл доступ.
+    """
+
+    @pytest.mark.parametrize("status", [401, 403, 429])
+    async def test_an_edge_refusal_is_not_retried(self, status: int) -> None:
+        # Один ответ, а не три: повторов быть не должно, и лишние
+        # заготовленные ответы скрыли бы их наличие.
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=status,
+                    text="blocked",
+                    headers={"Server": "CloudFront"},
+                )
+            ]
+        )
+
+        with pytest.raises(ProviderError) as refusal:
+            await adapter.get_quote(_request())
+
+        assert refusal.value.info.retryability is Retryability.NON_RETRYABLE
+
+    async def test_other_temporary_failures_are_still_retried(self) -> None:
+        """Собственная неполадка провайдера повтором лечится."""
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=500,
+                    text=json.dumps(
+                        {"errorType": "PriceEstimationError", "description": "try again"}
+                    ),
+                )
+            ]
+            * 3
+        )
+
+        with pytest.raises(ProviderError) as refusal:
+            await adapter.get_quote(_request())
+
+        assert refusal.value.info.retryability is Retryability.CONDITIONAL
