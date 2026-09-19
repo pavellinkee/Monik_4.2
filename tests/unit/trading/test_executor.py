@@ -19,6 +19,7 @@ from monik.domain.enums.operations import OperationType, RoutingMode
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
+from monik.domain.errors import DataError
 from monik.domain.models.execution import OrderOutcome, OrderState
 from monik.domain.models.opportunity import Candidate
 from monik.domain.models.scan import Scan, ScanScope
@@ -820,8 +821,6 @@ class TestPlacementFailure:
     """
 
     async def test_a_rejected_order_closes_the_trade(self) -> None:
-        from monik.domain.errors import DataError
-
         node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
         positions = MemoryPositions()
         executor, adapter = _order_executor(node, positions)
@@ -845,3 +844,51 @@ class TestPlacementFailure:
         assert settled.status is PositionStatus.FAILED
         assert settled.raw_returned == settled.raw_input
         assert settled.closed_at is not None
+
+
+class TestNothingSentWording:
+    """Неотправленная покупка — ни откат, ни невзятая заявка.
+
+    19.09 на сделке #T15 в журнал попали обе формулировки сразу: сначала
+    верная от наблюдателя, следом неверная от расчёта итога. Ни
+    транзакции, ни заявки у такой записи нет, и говорить об откате
+    значит послать оператора искать в цепи то, чего там не было.
+    """
+
+    async def test_a_trade_that_was_never_sent_says_so(self) -> None:
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("monik.services.trading.executor")
+        handler = _Collect(level=logging.INFO)
+        previous = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            node = ScriptedNode(balances={USDT_ADDRESS: 200_000_000})
+            positions = MemoryPositions()
+            executor, adapter = _order_executor(node, positions)
+            adapter.place_error = DataError("book refused", code="order_rejected")
+            await executor.consider(
+                (
+                    _result(
+                        _candidate(
+                            100_000_000,
+                            "0.20",
+                            buy_provider=ProviderId.COW,
+                            sell_provider=ProviderId.COW,
+                        )
+                    ),
+                )
+            )
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous)
+
+        messages = [record.getMessage() for record in records]
+        assert "trade closed without a buy: nothing was ever sent" in messages
+        assert "trade failed: the buy transaction reverted" not in messages
+        assert "trade closed without a buy: the order was not filled" not in messages

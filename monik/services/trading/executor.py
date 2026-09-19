@@ -595,10 +595,18 @@ class TradeExecutor:
                     "trade closed without a buy: the order was not filled",
                     extra=log_fields(t_id=str(position.t_id), order=position.buy_order_uid),
                 )
-            else:
+            elif position.buy_tx_hash is not None:
                 _LOGGER.warning(
                     "trade failed: the buy transaction reverted",
-                    extra=log_fields(t_id=str(position.t_id), tx=position.buy_tx_hash or ""),
+                    extra=log_fields(t_id=str(position.t_id), tx=position.buy_tx_hash),
+                )
+            else:
+                # Ни заявки, ни транзакции: отправить не удалось вовсе.
+                # Говорить об откате здесь так же неверно, как о
+                # невзятой заявке, — не было ни того, ни другого.
+                _LOGGER.info(
+                    "trade closed without a buy: nothing was ever sent",
+                    extra=log_fields(t_id=str(position.t_id)),
                 )
             return updated
         after = await self._account.token_balance(position.target_token, priority=_PRIORITY)
