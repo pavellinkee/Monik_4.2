@@ -46,7 +46,7 @@ from monik.domain.enums.scheduler import TaskMode
 from monik.infrastructure.db import Database, MigrationRunner
 from monik.infrastructure.providers.contract import AggregatorAdapter
 from monik.services.commands.parser import CommandName, action_callback_data
-from monik.services.notifications import StartupSummary
+from monik.services.notifications import ModeSummary, StartupSummary
 from monik.services.observability import MetricsRegistry
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
@@ -291,8 +291,61 @@ class Application:
                 ),
                 health=self.container.health.application_health(),
                 recovered=report.total,
+                modes=self._running_modes(),
             )
         )
+
+    def _running_modes(self) -> tuple[ModeSummary, ...]:
+        """Что на самом деле работает, по одному описанию на режим.
+
+        Состав берётся у сканера, а не из списка включённых сетей: сеть
+        может быть объявлена и подготовлена, но не сканироваться ни одним
+        режимом, и тогда она к работе отношения не имеет. Именно это
+        расхождение и делало прежнее уведомление обманчивым.
+
+        Правила отбора токенов у режимов разные, и повторять их здесь
+        нельзя: они живут в сканере и спрашиваются у него.
+        """
+        config = self.container.configuration
+        tokens = self.container.tokens
+        summaries: list[ModeSummary] = []
+        for mode in config.scanner.modes.enabled_modes():
+            settings = config.scanner.modes.for_mode(mode)
+            scopes = self.container.level1.scopes(mode)
+            if not scopes:
+                continue
+            networks: list[str] = []
+            providers: list[str] = []
+            symbols: list[str] = []
+            bases: list[str] = []
+            amounts: list[str] = []
+            for scope in scopes:
+                networks.extend(str(network) for network in scope.networks)
+                providers.extend(provider.value for provider in scope.providers)
+                for key in scope.tokens:
+                    token = tokens.get(key)
+                    if token is not None:
+                        symbols.append(str(token.symbol))
+                for network in scope.networks:
+                    base = tokens.base_token(network)
+                    bases.append(str(base.symbol))
+                    amounts.extend(
+                        str(base.amount_from_base_units(raw).as_decimal.normalize())
+                        for raw in scope.raw_amounts
+                    )
+            summaries.append(
+                ModeSummary(
+                    name=mode.value,
+                    networks=tuple(dict.fromkeys(networks)),
+                    providers=tuple(dict.fromkeys(providers)),
+                    tokens=tuple(dict.fromkeys(symbols)),
+                    base_token=next(iter(dict.fromkeys(bases)), None),
+                    amounts=tuple(dict.fromkeys(amounts)),
+                    interval_seconds=settings.interval_seconds,
+                    threshold_percent=str(config.profitability.threshold_for(mode)),
+                )
+            )
+        return tuple(summaries)
 
     async def _scheduler_loop(self) -> None:
         """Периодически выполнять готовые задачи планировщика.

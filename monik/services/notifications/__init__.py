@@ -19,6 +19,7 @@ from monik.services.notifications.ports import (
     OutgoingMessage,
 )
 from monik.services.notifications.system import (
+    ModeSummary,
     StartupSummary,
     SystemNotificationState,
     SystemNotifier,
@@ -35,6 +36,7 @@ __all__ = [
     "NotificationTransport",
     "OutgoingMessage",
     "SendDecision",
+    "ModeSummary",
     "StartupSummary",
     "SystemNotificationState",
     "SystemNotifier",

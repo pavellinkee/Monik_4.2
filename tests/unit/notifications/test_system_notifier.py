@@ -25,7 +25,12 @@ from monik.domain.errors import NetworkError
 from monik.domain.models.health import ApplicationHealth, ComponentHealth, ProviderHealth
 from monik.domain.models.notification import NotificationDestination
 from monik.infrastructure.telegram import FakeTransport
-from monik.services.notifications import DeliveryReceipt, StartupSummary, SystemNotifier
+from monik.services.notifications import (
+    DeliveryReceipt,
+    ModeSummary,
+    StartupSummary,
+    SystemNotifier,
+)
 from monik.services.notifications.system import STARTUP_NOTIFIED_KEY
 from monik.services.observability import FakeClock
 from tests import factories as f
@@ -114,6 +119,18 @@ def _summary(**overrides: object) -> StartupSummary:
         "networks": ("polygon",),
         "providers": ("oneinch", "zero_x"),
         "health": _health(),
+        # Уведомление описывает работу, а не объявленные возможности:
+        # без работающего режима описывать нечего.
+        "modes": (
+            ModeSummary(
+                name="ann",
+                networks=("polygon",),
+                providers=("oneinch",),
+                tokens=("USDC",),
+                interval_seconds=30,
+                threshold_percent="0.01",
+            ),
+        ),
     }
     base.update(overrides)
     return StartupSummary(**base)  # type: ignore[arg-type]
@@ -129,6 +146,56 @@ class TestStartupNotification:
         assert "production" in text
         assert "polygon" in text
         assert "oneinch" in text
+
+    async def test_the_headline_names_the_running_mode(self) -> None:
+        """Оператор запускает конкретный проход, и заголовок называет его."""
+        transport = FakeTransport()
+        await _notifier(transport, FakeClock(f.NOW)).notify_startup(_summary())
+
+        assert transport.sent[0].text.splitlines()[0] == "🟢 Monik Ann запущен"
+
+    async def test_the_headline_lists_every_running_mode(self) -> None:
+        transport = FakeTransport()
+        summary = _summary(
+            modes=(
+                ModeSummary(name="ur", networks=("polygon",), providers=("oneinch",), tokens=()),
+                ModeSummary(name="ann", networks=("polygon",), providers=("oneinch",), tokens=()),
+            )
+        )
+        await _notifier(transport, FakeClock(f.NOW)).notify_startup(summary)
+
+        assert transport.sent[0].text.splitlines()[0] == "🟢 Monik Ur, Ann запущен"
+
+    async def test_only_the_networks_of_the_running_mode_are_named(self) -> None:
+        """Сеть, объявленная включённой, но не сканируемая, в работу не входит.
+
+        Именно это расхождение вводило оператора в заблуждение: сеть
+        значилась в уведомлении, хотя ни один режим её не трогал.
+        """
+        transport = FakeTransport()
+        summary = _summary(
+            networks=("polygon", "arbitrum"),
+            modes=(
+                ModeSummary(
+                    name="ann",
+                    networks=("polygon",),
+                    providers=("oneinch",),
+                    tokens=("USDC",),
+                ),
+            ),
+        )
+        await _notifier(transport, FakeClock(f.NOW)).notify_startup(summary)
+
+        assert "arbitrum" not in transport.sent[0].text
+        assert "polygon" in transport.sent[0].text
+
+    async def test_a_stopped_scanner_says_so(self) -> None:
+        transport = FakeTransport()
+        await _notifier(transport, FakeClock(f.NOW)).notify_startup(_summary(modes=()))
+
+        text = transport.sent[0].text
+        assert text.splitlines()[0] == "🟢 Monik запущен"
+        assert "ни один режим не включён" in text
 
     async def test_degraded_startup_reports_warning(self) -> None:
         transport = FakeTransport()

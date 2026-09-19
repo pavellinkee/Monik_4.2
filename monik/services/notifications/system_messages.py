@@ -19,6 +19,7 @@ from monik.domain.enums.notifications import StartupKind, SystemAlertSeverity
 from monik.domain.models.health import ApplicationHealth
 
 __all__ = [
+    "ModeSummary",
     "UPDATE_BUTTON_LABEL",
     "StartupSummary",
     "aggregated_text",
@@ -91,6 +92,37 @@ _STARTUP_COMPONENTS = ("level1", "level2", "notifications", "database", "schedul
 
 
 @dataclass(frozen=True, slots=True)
+class ModeSummary:
+    """Что именно работает в одном режиме прохода.
+
+    Уведомление о запуске описывает работу, а не объявленные
+    возможности. Сеть, включённая в конфигурации, но не сканируемая ни
+    одним режимом, в работе не участвует, и называть её работающей —
+    значит вводить оператора в заблуждение. Поэтому состав берётся у
+    самого сканера, а не из списка включённых сетей.
+    """
+
+    name: str
+    networks: tuple[str, ...]
+    providers: tuple[str, ...]
+    #: Промежуточные токены круга. Базовый в них не входит: круг
+    #: начинается и заканчивается им, и в списке целей его нет.
+    tokens: tuple[str, ...]
+    #: Базовый токен круга. Без него список выше читается неверно:
+    #: оператор видит два токена там, где работают три.
+    base_token: str | None = None
+    #: Суммы, которыми идёт проход.
+    amounts: tuple[str, ...] = ()
+    interval_seconds: int | None = None
+    threshold_percent: str | None = None
+
+    @property
+    def title(self) -> str:
+        """Имя режима для заголовка: ``ann`` → ``Ann``."""
+        return self.name.capitalize()
+
+
+@dataclass(frozen=True, slots=True)
 class StartupSummary:
     """Данные для сообщения о завершении запуска.
 
@@ -107,6 +139,8 @@ class StartupSummary:
     providers: tuple[str, ...]
     health: ApplicationHealth
     recovered: int = 0
+    #: Работающие режимы прохода. Пусто — сканирование не идёт вовсе.
+    modes: tuple[ModeSummary, ...] = ()
 
 
 def _network_label(networks: tuple[str, ...]) -> str:
@@ -145,21 +179,71 @@ def startup_text(summary: StartupSummary) -> str:
     """
     status = summary.health.status
     severity = _startup_severity(status)
-    headline = _STARTUP_HEADLINES[summary.kind] + _STARTUP_SUFFIX.get(status, "")
+    headline = _startup_headline(summary) + _STARTUP_SUFFIX.get(status, "")
     lines = [
         f"{_MARKERS[severity]} {headline}",
         f"Версия: {summary.version}",
         f"Окружение: {summary.environment}",
-        f"{_network_label(summary.networks)}: "
-        f"{', '.join(summary.networks) if summary.networks else 'не настроены'}",
-        f"Провайдеры: {', '.join(summary.providers) if summary.providers else 'не настроены'}",
     ]
+    lines.extend(_mode_lines(summary))
     lines.extend(_component_lines(summary.health))
     lines.extend(_provider_lines(summary.health))
     if summary.recovered:
         lines.append(f"Восстановлено незавершённых записей: {summary.recovered}")
     lines.append(f"Общее состояние: {status.value}")
     return "\n".join(lines)
+
+
+def _startup_headline(summary: StartupSummary) -> str:
+    """Заголовок с именем работающего режима.
+
+    Оператор запускает не «Monik вообще», а конкретный проход, и первая
+    строка уведомления должна называть именно его. Когда режимов
+    несколько, перечисляются все; когда не работает ни один — остаётся
+    прежний общий заголовок, потому что называть нечего.
+    """
+    base = _STARTUP_HEADLINES[summary.kind]
+    if not summary.modes:
+        return base
+    names = ", ".join(mode.title for mode in summary.modes)
+    verb = base.removeprefix("Monik").strip()
+    return f"Monik {names} {verb}"
+
+
+def _mode_lines(summary: StartupSummary) -> list[str]:
+    """Описание каждого работающего режима.
+
+    Перечисляется то, что относится к самому проходу: где он идёт, у
+    кого спрашивает и что проверяет. Объявленные, но не участвующие в
+    работе сети и агрегаторы сюда не попадают.
+    """
+    if not summary.modes:
+        return ["Сканирование: ни один режим не включён"]
+    lines: list[str] = []
+    for mode in summary.modes:
+        lines.append(f"Режим {mode.title}")
+        lines.append(
+            f"  {_network_label(mode.networks)}: "
+            f"{', '.join(mode.networks) if mode.networks else 'нет'}"
+        )
+        lines.append(f"  Агрегаторы: {', '.join(mode.providers) if mode.providers else 'нет'}")
+        if mode.tokens:
+            circle = ", ".join(mode.tokens)
+            lines.append(
+                f"  Круг: {mode.base_token} → {circle} → {mode.base_token}"
+                if mode.base_token
+                else f"  Токены: {circle}"
+            )
+        if mode.amounts:
+            lines.append(f"  Суммы: {', '.join(mode.amounts)}")
+        pace: list[str] = []
+        if mode.interval_seconds is not None:
+            pace.append(f"проход раз в {mode.interval_seconds} с")
+        if mode.threshold_percent is not None:
+            pace.append(f"порог {mode.threshold_percent} %")
+        if pace:
+            lines.append(f"  {', '.join(pace)}")
+    return lines
 
 
 def scanner_stopped_text(reason: ScannerStopReason, *, detail: str | None = None) -> str:

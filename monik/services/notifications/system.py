@@ -39,6 +39,7 @@ from monik.services.notifications.ports import (
 )
 from monik.services.notifications.system_messages import (
     UPDATE_BUTTON_LABEL,
+    ModeSummary,
     StartupSummary,
     aggregated_text,
     pending_updates_text,
@@ -52,7 +53,7 @@ from monik.services.notifications.system_messages import (
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 
-__all__ = ["StartupSummary", "SystemNotificationState", "SystemNotifier"]
+__all__ = ["ModeSummary", "StartupSummary", "SystemNotificationState", "SystemNotifier"]
 
 _LOGGER = get_logger("services.notifications.system")
 

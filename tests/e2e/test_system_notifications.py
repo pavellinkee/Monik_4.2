@@ -123,7 +123,10 @@ async def test_startup_sends_a_single_status_message(
         assert len(transport.sent) == 1
         text = transport.sent[0].text
         assert text.startswith("🟢")
-        assert "Monik запущен" in text
+        # Заголовок называет работающий проход, а не «Monik вообще»:
+        # оператор запускает режим и хочет видеть в первой строке его.
+        assert text.splitlines()[0] == "🟢 Monik Ur запущен"
+        assert "Режим Ur" in text
         assert "oneinch" in text
         assert app.startup_kind is StartupKind.INITIAL
     finally:
