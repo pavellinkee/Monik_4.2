@@ -37,7 +37,7 @@ from monik.config.sections import (
     TradingConfig,
 )
 from monik.domain.enums.modes import ScanMode
-from monik.domain.enums.providers import ProviderId
+from monik.domain.enums.providers import ProviderId, requires_credentials
 from monik.domain.enums.scheduler import TaskMode
 from monik.domain.value_objects.amounts import TokenAmount
 from monik.domain.value_objects.fingerprints import compute_fingerprint
@@ -273,7 +273,7 @@ class Configuration(ConfigSection):
         if not self.database.integrity_check_on_startup:
             raise ValueError("integrity_check_on_startup must stay enabled in production")
         for provider in self.enabled_providers:
-            if provider.api_key is None:
+            if provider.api_key is None and requires_credentials(provider.provider_id):
                 raise ValueError(
                     f"provider {provider.provider_id.value} is enabled in production "
                     "without a credentials reference"
