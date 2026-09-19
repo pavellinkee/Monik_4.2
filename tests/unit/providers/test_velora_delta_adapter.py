@@ -330,3 +330,27 @@ class TestRefusals:
 
         with pytest.raises(RouteRejectedError):
             await adapter.get_quote(_request())
+
+
+class TestObservedStatus:
+    async def test_the_running_state_is_not_final(self) -> None:
+        """``RUNNING`` наблюдено вживую на сделке #T3 19.09.
+
+        Так выглядит заявка, принятая книгой и ещё не взятая агентом:
+        ``transactions`` пуст, средства на счету не тронуты. Считать её
+        исполненной нельзя, неудачной — тоже.
+        """
+        adapter = _adapter(
+            [
+                HttpResponse(
+                    status_code=200,
+                    text=json.dumps({"status": "RUNNING", "transactions": []}),
+                )
+            ]
+        )
+
+        state = await adapter.order_state(f.POLYGON, "uuid", operation=OperationType.BUY)
+
+        assert state.outcome is OrderOutcome.OPEN
+        assert state.is_final is False
+        assert state.executed_output_raw == 0

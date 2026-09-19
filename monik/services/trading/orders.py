@@ -32,7 +32,12 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.wallet import TradingWallet
 
-__all__ = ["SignedOrderRunner", "executes_with_orders", "leg_gas_units"]
+__all__ = [
+    "SignedOrderRunner",
+    "executes_with_orders",
+    "leg_gas_units",
+    "leg_slippage_bps",
+]
 
 _LOGGER = get_logger("services.trading.orders")
 
@@ -52,6 +57,23 @@ def executes_with_orders(adapter: AggregatorAdapter) -> bool:
     (``CLAUDE.md`` §7).
     """
     return adapter.capabilities.supports_signed_orders
+
+
+def leg_slippage_bps(adapter: AggregatorAdapter, *, transaction: int, order: int) -> int:
+    """Какой допуск уместен этой ноге.
+
+    Различие принадлежит форме исполнения, а не провайдеру. Транзакции
+    допуск нужен: между сборкой и включением в блок пул шевелится, и без
+    запаса обмен откатывается, теряя газ. Подписанному намерению он не
+    нужен: если решатель не готов отдать названную сумму, он просто не
+    возьмёт заявку — это несостоявшаяся сделка, а не убыток.
+
+    Уступка вычитается по разу на ногу, поэтому на круге удваивается.
+    При пороге в один базисный пункт уступка того же размера на обеих
+    ногах делает прибыльный круг невозможным по построению: замер 19.09
+    дал требуемое расхождение около 0,029 % там, где рынок давал 0,015 %.
+    """
+    return order if executes_with_orders(adapter) else transaction
 
 
 def leg_gas_units(offer: ExecutionOffer) -> int:

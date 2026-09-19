@@ -50,6 +50,7 @@ from monik.services.trading.orders import (
     SignedOrderRunner,
     executes_with_orders,
     leg_gas_units,
+    leg_slippage_bps,
 )
 from monik.services.trading.ports import ExecutionCosts, GasCalibrationRecorder, PositionStore
 from monik.services.trading.sender import SentTransaction, TransactionSender
@@ -101,6 +102,7 @@ class PositionWatcher:
         slippage_bps: int,
         long_wait_enabled: bool,
         long_wait_seconds: int,
+        order_slippage_bps: int = 0,
         orders: SignedOrderRunner | None = None,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
@@ -118,6 +120,8 @@ class PositionWatcher:
         self._slippage_bps = slippage_bps
         self._long_wait_enabled = long_wait_enabled
         self._long_wait = timedelta(seconds=long_wait_seconds)
+        #: Допуск ноги, исполняемой намерением: у неё промах бесплатен.
+        self._order_slippage_bps = order_slippage_bps
         self._orders = orders
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
@@ -354,7 +358,9 @@ class PositionWatcher:
             output_token=position.base_token,
             input_amount=position.target_token.amount_from_base_units(position.raw_acquired),
             request_id=RequestId.generate(),
-            slippage_bps=self._slippage_bps,
+            slippage_bps=leg_slippage_bps(
+                adapter, transaction=self._slippage_bps, order=self._order_slippage_bps
+            ),
             # Открытая сделка ждать не может: пока котировка выхода стоит
             # в очереди, купленный токен остаётся на руках
             # (``the_main_rules.md``, правило 13).

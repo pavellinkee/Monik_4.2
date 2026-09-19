@@ -47,6 +47,7 @@ from monik.services.trading.orders import (
     SignedOrderRunner,
     executes_with_orders,
     leg_gas_units,
+    leg_slippage_bps,
 )
 from monik.services.trading.ports import (
     ExecutionCosts,
@@ -96,6 +97,7 @@ class TradeExecutor:
         is_execution_open: Callable[[], bool],
         slippage_bps: int,
         min_entry_profit_raw: int,
+        order_slippage_bps: int = 0,
         orders: SignedOrderRunner | None = None,
         max_offer_checks: int = 10,
         receipt_timeout_seconds: int = 120,
@@ -114,6 +116,9 @@ class TradeExecutor:
         self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
         self._min_entry_profit_raw = min_entry_profit_raw
+        #: Допуск ноги, исполняемой намерением. Отдельный от общего,
+        #: потому что промах у неё бесплатен.
+        self._order_slippage_bps = order_slippage_bps
         #: Исполнение подписанной заявкой. ``None`` означает, что такой
         #: формы у системы нет: провайдер, исполняющий заявками, тогда
         #: годится для поиска, но сделку по нему открывать нечем.
@@ -311,6 +316,12 @@ class TradeExecutor:
         _LOGGER.info("trade offer verified", extra=fields)
         return True
 
+    def _slippage_for(self, adapter: AggregatorAdapter) -> int:
+        """Допуск, уместный форме исполнения этого провайдера."""
+        return leg_slippage_bps(
+            adapter, transaction=self._slippage_bps, order=self._order_slippage_bps
+        )
+
     async def _build_offer(
         self, adapter: AggregatorAdapter, request: QuoteRequest
     ) -> ExecutionPlan:
@@ -348,7 +359,7 @@ class TradeExecutor:
                     output_token=choice.base,
                     input_amount=amount,
                     request_id=RequestId.generate(),
-                    slippage_bps=self._slippage_bps,
+                    slippage_bps=self._slippage_for(seller),
                     priority=_PRIORITY,
                 ),
             )
@@ -378,7 +389,7 @@ class TradeExecutor:
                 output_token=choice.target,
                 input_amount=candidate.buy_quote.input_amount,
                 request_id=RequestId.generate(),
-                slippage_bps=self._slippage_bps,
+                slippage_bps=self._slippage_for(adapter),
                 # Сделка обслуживается раньше поиска
                 # (``the_main_rules.md``, правило 13).
                 priority=RequestPriority.ANN_BUY,

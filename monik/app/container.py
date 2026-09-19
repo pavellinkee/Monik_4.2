@@ -499,6 +499,7 @@ def build_container(
             min_entry_profit_raw=int(
                 config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
             ),
+            order_slippage_bps=int(config.trading.order_slippage_percent * 100),
             orders=order_runner,
             max_offer_checks=config.trading.max_offer_checks,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
@@ -525,6 +526,7 @@ def build_container(
             slippage_bps=int(config.trading.slippage_percent * 100),
             long_wait_enabled=config.trading.max_wait_notice_enabled,
             long_wait_seconds=config.trading.max_wait_notice_seconds,
+            order_slippage_bps=int(config.trading.order_slippage_percent * 100),
             orders=order_runner,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,

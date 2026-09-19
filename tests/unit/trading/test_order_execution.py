@@ -32,6 +32,7 @@ from monik.services.trading.orders import (
     SignedOrderRunner,
     executes_with_orders,
     leg_gas_units,
+    leg_slippage_bps,
 )
 from tests import factories as f
 
@@ -54,6 +55,20 @@ def _order_adapter(clock: FakeClock, rate: str = "1") -> FakeAdapter:
             supports_signed_orders=True,
         ),
     )
+
+
+def _request_with(**overrides: object) -> QuoteRequest:
+    base: dict[str, object] = {
+        "network_id": f.POLYGON,
+        "operation": OperationType.BUY,
+        "input_token": f.USDT,
+        "output_token": f.AAVE,
+        "input_amount": f.USDT.amount_from_base_units(100_000_000),
+        "request_id": RequestId.generate(),
+        "slippage_bps": 10,
+    }
+    base.update(overrides)
+    return QuoteRequest(**base)  # type: ignore[arg-type]
 
 
 def _request() -> QuoteRequest:
@@ -175,3 +190,38 @@ class TestPositionStatus:
         assert PositionStatus.BUYING
         assert PositionStatus.HOLDING
         assert PositionStatus.FAILED
+
+
+class TestLegTolerance:
+    """Допуск принадлежит форме исполнения, а не провайдеру.
+
+    Уступка вычитается по разу на ногу и потому на круге удваивается.
+    Замер 19.09: при допуске в один базисный пункт на обеих ногах круг
+    обязан был бы давать около 0,029 %, тогда как рынок давал 0,015 %, —
+    то есть настройка, а не цена, делала сделку невозможной.
+    """
+
+    def test_a_transaction_leg_keeps_its_tolerance(self) -> None:
+        """Узкий допуск у транзакции оборачивается откатом и стоит газа."""
+        clock = FakeClock(f.NOW)
+
+        assert leg_slippage_bps(FakeAdapter(ProviderId.UNISWAP, clock), transaction=1, order=0) == 1
+
+    def test_an_order_leg_needs_no_tolerance(self) -> None:
+        """Неисполненная заявка не стоит ничего: её просто не возьмут."""
+        clock = FakeClock(f.NOW)
+
+        assert leg_slippage_bps(_order_adapter(clock), transaction=1, order=0) == 0
+
+    async def test_a_zero_tolerance_order_commits_to_the_whole_quote(self) -> None:
+        """При нулевом допуске предел заявки равен обещанию.
+
+        Проверено живым API 19.09: ``slippage=0`` даёт предел, в точности
+        равный ожидаемой сумме.
+        """
+        clock = FakeClock(f.NOW)
+        adapter = _order_adapter(clock)
+
+        plan = await adapter.build_order(_request_with(slippage_bps=0))
+
+        assert plan.min_output_raw == plan.quote.output_amount.raw
