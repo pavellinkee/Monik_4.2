@@ -215,3 +215,101 @@ class TestSchedule:
 
         assert await reporter.tick() is False
         assert notifier.sent == []
+
+
+class TestDrift:
+    """Расписание отчёта не должно уезжать.
+
+    Задачу опрашивает планировщик со своим шагом, и плановая граница
+    почти никогда не совпадает с тактом. Если считать концом промежутка
+    момент проверки, следующий срок отсчитывается от уже опоздавшего, и
+    опоздание переносится вперёд вместо того, чтобы погаситься.
+    """
+
+    async def test_a_late_check_keeps_the_planned_boundary(self) -> None:
+        """Промежуток берётся по плану, а не по моменту проверки.
+
+        Проверяется сама граница, а не заголовок: тот округляется до
+        минут и разницу в секундах спрятал бы.
+        """
+
+        class _Recording(_Positions):
+            def __init__(self) -> None:
+                super().__init__()
+                self.window: tuple[object, object] | None = None
+
+            async def closed_between(self, *, since: object, until: object) -> tuple[Position, ...]:
+                self.window = (since, until)
+                return ()
+
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        positions = _Recording()
+        reporter = _reporter(clock, notifier, positions=positions)
+        await reporter.tick()
+
+        clock.advance(timedelta(minutes=30, seconds=20))
+
+        assert await reporter.tick() is True
+        assert positions.window == (SINCE, SINCE + timedelta(minutes=30)), (
+            "лишние двадцать секунд в промежуток не вошли"
+        )
+
+    async def test_the_lateness_does_not_accumulate(self) -> None:
+        """Опоздание одного такта не сдвигает все последующие.
+
+        Прежде конец промежутка записывался моментом проверки, и каждый
+        следующий срок отсчитывался от опоздавшего: за сутки отчёт
+        уезжал на десятки минут.
+        """
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        reporter = _reporter(clock, notifier)
+        await reporter.tick()
+
+        # Каждый такт опаздывает на 20 секунд, но граница остаётся на месте.
+        clock.advance(timedelta(minutes=30, seconds=20))
+        await reporter.tick()
+        clock.advance(timedelta(minutes=29, seconds=40))
+        await reporter.tick()
+        clock.advance(timedelta(minutes=30))
+        await reporter.tick()
+
+        assert [text.splitlines()[0] for text in notifier.sent] == [
+            "📊 Отчёт ann за 12:00–12:30",
+            "📊 Отчёт ann за 12:30–13:00",
+            "📊 Отчёт ann за 13:00–13:30",
+        ]
+
+    async def test_a_long_stall_is_covered_by_a_single_report(self) -> None:
+        """Пропущенное уходит одним отчётом, а не очередью сообщений.
+
+        Догонять пачкой нельзя: оператор получил бы подряд несколько
+        отчётов за прошедшее, и телефон зазвонил бы шесть раз вместо
+        одного.
+        """
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        reporter = _reporter(clock, notifier)
+        await reporter.tick()
+
+        clock.advance(timedelta(hours=3))
+        assert await reporter.tick() is True
+        assert await reporter.tick() is False, "очереди догоняющих отчётов нет"
+
+        assert len(notifier.sent) == 1
+        assert "12:00–15:00" in notifier.sent[0], "промежуток покрыт целиком"
+
+    async def test_the_schedule_resumes_after_a_stall(self) -> None:
+        """После пропуска расписание снова идёт по плану."""
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        reporter = _reporter(clock, notifier)
+        await reporter.tick()
+        clock.advance(timedelta(hours=3))
+        await reporter.tick()
+
+        clock.advance(timedelta(minutes=30))
+
+        assert await reporter.tick() is True
+        assert "15:00–15:30" in notifier.sent[1]
