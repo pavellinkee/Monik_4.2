@@ -102,6 +102,7 @@ class PositionWatcher:
         slippage_bps: int,
         long_wait_enabled: bool,
         long_wait_seconds: int,
+        exit_requires_profit: bool = True,
         order_slippage_bps: int = 0,
         orders: SignedOrderRunner | None = None,
         receipt_timeout_seconds: int = 120,
@@ -120,6 +121,9 @@ class PositionWatcher:
         self._slippage_bps = slippage_bps
         self._long_wait_enabled = long_wait_enabled
         self._long_wait = timedelta(seconds=long_wait_seconds)
+        #: Требовать ли прибыли для выхода. Выключение отменяет и
+        #: пороги, и гарантию «не закрывать в убыток».
+        self._exit_requires_profit = exit_requires_profit
         #: Допуск ноги, исполняемой намерением: у неё промах бесплатен.
         self._order_slippage_bps = order_slippage_bps
         self._orders = orders
@@ -361,7 +365,14 @@ class PositionWatcher:
         adapter = self._adapters.get(position.sell_provider_id.value)
         if adapter is None:
             return None
-        needed = self._min_exit_profit_raw if immediate else self._min_exit_profit_waiting_raw
+        # Ноль — это не «порог отключён», а «согласны на любой исход».
+        # Отрицательные значения сюда не попадают: порог задан
+        # положительным, и выключение заменяет его целиком.
+        needed: int | None = (
+            self._min_exit_profit_raw if immediate else self._min_exit_profit_waiting_raw
+        )
+        if not self._exit_requires_profit:
+            needed = None
         decimals = position.base_token.decimals
         request = QuoteRequest(
             network_id=position.network_id,
@@ -383,21 +394,24 @@ class PositionWatcher:
         # превышает, поэтому круг, не окупающийся даже по обещанию, не
         # окупится и по минимуму — собирать ради него транзакцию незачем.
         gross = position.profit_if_sold_for(quote.output_amount.raw)
-        if gross < needed:
+        if needed is not None and gross < needed:
             return self._wait(position, profit=gross, needed=needed, costs=None)
 
         transaction = await self._build_offer(adapter, request)
         costs = await self._exit_costs_raw(position, transaction)
-        if costs is None:
+        if costs is None and needed is not None:
             # Стоимость круга неизвестна. Продавать вслепую нельзя:
             # неизвестный расход нулём не считается (``CLAUDE.md`` §12).
+            #
+            # Когда прибыль не требуется, неизвестная стоимость выходу не
+            # мешает: она влияет на решение, а решение уже принято.
             return self._wait(position, profit=gross, needed=needed, costs=None)
         # Решение принимается по тому, что агрегатор **обязуется** отдать,
         # а не по тому, что обещает. Котировка — реклама, минимум —
         # обязательство: ниже него обмен откатится он сам. Значит
         # исполнение может выйти лучше расчёта, но не хуже.
-        profit = position.profit_if_sold_for(transaction.min_output_raw, raw_costs=costs)
-        if profit < needed:
+        profit = position.profit_if_sold_for(transaction.min_output_raw, raw_costs=costs or 0)
+        if needed is not None and profit < needed:
             return self._wait(position, profit=profit, needed=needed, costs=costs)
         _LOGGER.info(
             "exit offer verified",
@@ -406,8 +420,10 @@ class PositionWatcher:
                 promised=str(Decimal(quote.output_amount.raw).scaleb(-decimals)),
                 guaranteed=str(Decimal(transaction.min_output_raw).scaleb(-decimals)),
                 profit=str(Decimal(profit).scaleb(-decimals)),
-                needed=str(Decimal(needed).scaleb(-decimals)),
-                gas=str(Decimal(costs).scaleb(-decimals)),
+                # Прибыль может не требоваться вовсе — тогда порога нет,
+                # и писать вместо него ноль значило бы солгать в журнале.
+                needed=_money(None if needed is None else Decimal(needed).scaleb(-decimals)),
+                gas=_money(None if costs is None else Decimal(costs).scaleb(-decimals)),
             ),
         )
         await self._sell(

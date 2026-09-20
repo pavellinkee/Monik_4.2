@@ -611,10 +611,34 @@ class TradeExecutor:
             return updated
         after = await self._account.token_balance(position.target_token, priority=_PRIORITY)
         acquired = after.raw - (position.raw_target_before_buy or 0)
+        if acquired <= 0:
+            # Покупка удалась, а прироста остатка не видно. Это не «мы
+            # ничего не получили» — это «мы ещё не знаем сколько»: узел
+            # мог ответить состоянием до включения транзакции.
+            #
+            # Прежний код подставлял здесь единицу, и сделка #T30 20.09
+            # повисла с записью в 0,000001 токена при почти сотне на
+            # счету: продать такую позицию было нечем, а причина
+            # пряталась за правдоподобным числом.
+            #
+            # Держать позицию с неизвестным количеством модель не
+            # позволяет — и правильно. Поэтому сделка остаётся в
+            # BUYING: наблюдатель вернётся к ней следующим тактом, когда
+            # остаток станет виден, и доведёт её тем же путём.
+            _LOGGER.warning(
+                "buy settled but the balance has not caught up yet",
+                extra=log_fields(
+                    t_id=str(position.t_id),
+                    tx=position.buy_tx_hash or position.buy_order_uid or "",
+                    before=str(position.raw_target_before_buy),
+                    after=str(after.raw),
+                ),
+            )
+            return position
         updated = position.model_copy(
             update={
                 "status": PositionStatus.HOLDING,
-                "raw_acquired": max(acquired, 1),
+                "raw_acquired": acquired,
                 "buy_gas_wei": gas_wei,
                 "buy_gas_units": gas_units,
                 "updated_at": now,

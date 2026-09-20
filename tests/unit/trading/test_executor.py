@@ -232,7 +232,12 @@ class TestRecording:
         assert node.sent, "и только потом отправлено"
 
     async def test_successful_buy_moves_the_trade_to_holding(self) -> None:
-        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        # Купленное обязано появиться на счету: количество берётся
+        # приростом остатка, а не из котировки.
+        node = ScriptedNode(
+            balances={USDT_ADDRESS: 60_000_000},
+            after_send={str(f.AAVE.address).lower(): 5_000_000_000_000_000_000},
+        )
         positions = MemoryPositions()
 
         position = await _executor(node, positions).consider(
@@ -241,7 +246,27 @@ class TestRecording:
 
         assert position is not None
         assert position.status is PositionStatus.HOLDING
+        assert position.raw_acquired == 5_000_000_000_000_000_000
         assert position.buy_tx_hash is not None
+
+    async def test_a_buy_whose_tokens_are_not_visible_yet_stays_buying(self) -> None:
+        """Прироста не видно — значит количество неизвестно, а не равно нулю.
+
+        Узел мог ответить состоянием до включения транзакции. Прежде
+        сюда подставлялась единица, и сделка #T30 20.09 повисла с
+        записью в 0,000001 токена при почти сотне на счету: продать её
+        было нечем. Теперь сделка ждёт следующего такта наблюдателя.
+        """
+        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        positions = MemoryPositions()
+
+        position = await _executor(node, positions).consider(
+            (_result(_candidate(50_000_000, "0.1")),)
+        )
+
+        assert position is not None
+        assert position.status is PositionStatus.BUYING
+        assert position.raw_acquired is None
 
     async def test_reverted_buy_closes_the_trade_as_failed(self) -> None:
         node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000}, receipt_ok=False)

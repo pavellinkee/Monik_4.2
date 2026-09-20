@@ -87,6 +87,7 @@ def _watcher(
     sell_rate: str = "10.00",
     long_wait_enabled: bool = True,
     long_wait_seconds: int = 7_200,
+    exit_requires_profit: bool = True,
 ) -> PositionWatcher:
     active = clock or FakeClock(f.NOW)
     exit_costs = costs or FixedCosts(COSTS_RAW)
@@ -131,6 +132,7 @@ def _watcher(
         # решать их исход не должна. Там, где она и проверяется, допуск
         # задаётся явно.
         slippage_bps=slippage_bps,
+        exit_requires_profit=exit_requires_profit,
         long_wait_enabled=long_wait_enabled,
         long_wait_seconds=long_wait_seconds,
         receipt_timeout_seconds=1,
@@ -269,7 +271,7 @@ class TestLongWait:
 class TestRecovery:
     async def test_pending_buy_is_picked_up_after_a_restart(self) -> None:
         """Сделка, отправленная до перезапуска, доводится наблюдателем."""
-        node = ScriptedNode()
+        node = ScriptedNode(balances={str(f.AAVE.address).lower(): ACQUIRED})
         positions = MemoryPositions()
         watcher = _watcher(node, positions)
         await positions.create(
@@ -772,3 +774,42 @@ class TestNeverStartedBuy:
         assert settled.status is PositionStatus.FAILED
         assert settled.raw_returned == settled.raw_input
         assert settled.closed_at is not None
+
+
+class TestExitWithoutProfit:
+    """Выход без требования прибыли.
+
+    Правило 11 говорит, что система никогда не закрывает позицию в
+    убыток сама, и это верно, пока купленное возвращается к прежней
+    цене. Оператор вправе отменить это: выйти из позиции, которая ждёт
+    неопределённо долго, не дожидаясь возврата. Цена — возможный убыток
+    на размер расхождения плюс газ (правило 20).
+    """
+
+    async def test_a_losing_circle_is_sold_when_profit_is_not_required(self) -> None:
+        node = ScriptedNode(
+            balances={str(f.USDT.address).lower(): 0},
+            after_send={str(f.USDT.address).lower(): 49_000_000},
+        )
+        positions = MemoryPositions()
+        position = _position()
+        await positions.create(position)
+        # Курс заведомо убыточный: обычный порог такой выход запретил бы.
+        watcher = _watcher(node, positions, sell_rate="9.80", exit_requires_profit=False)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is not PositionStatus.HOLDING
+
+    async def test_the_same_circle_is_refused_while_profit_is_required(self) -> None:
+        """Обратная проверка: без выключения поведение прежнее."""
+        node = ScriptedNode(balances={str(f.USDT.address).lower(): 0})
+        positions = MemoryPositions()
+        position = _position()
+        await positions.create(position)
+        watcher = _watcher(node, positions, sell_rate="9.80")
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
