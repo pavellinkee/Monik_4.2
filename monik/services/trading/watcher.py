@@ -20,6 +20,11 @@
 заперты, и выйти из них выгоднее, чем ждать прежней прибыли
 (решение оператора).
 
+Различаются и продавцы. Немедленная проверка остаётся на назначенном:
+маршрут только что выбран проходом. Отложенная опрашивает всех
+включённых агрегаторов и берёт лучшее предложение — назначение к тому
+времени устарело (``the_main_rules.md``, правило 21).
+
 Система никогда не закрывает позицию в убыток сама. Если ожидание
 затянулось, она **сообщает оператору** и продолжает ждать: решение
 принимает человек (``the_main_rules.md``, правило 11).
@@ -31,6 +36,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from monik.domain.enums.operations import OperationType
+from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.resources import RequestPriority
 from monik.domain.enums.trading import PositionStatus
 from monik.domain.models.execution import (
@@ -46,6 +52,7 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.chain import ChainAccount
 from monik.services.trading.executor import TradeExecutor
+from monik.services.trading.exits import ExitCandidate, projected_output, rank_exits
 from monik.services.trading.orders import (
     SignedOrderRunner,
     executes_with_orders,
@@ -354,16 +361,20 @@ class PositionWatcher:
         Агрегатор — обменник, а не биржа, и обязательство у него своё,
         не равное рекламе.
 
+        Кого спрашивать, решает положение сделки, а не техника: сразу
+        после покупки — назначенного продавца, в ожидании — всех
+        включённых (``the_main_rules.md``, правило 21).
+
         Порядок шагов выбран так, чтобы не тратить запросов впустую.
-        Сначала берётся котировка — она служит дешёвым отсевом, потому
-        что обязательство её не превышает: круг, не окупающийся даже по
-        обещанию, не окупится и по минимуму. Транзакция собирается
-        только у круга, у которого есть шанс.
+        Сначала берутся котировки — они служат дешёвым отсевом, потому
+        что обязательство котировку не превышает: круг, не окупающийся
+        даже по обещанию, не окупится и по минимуму. Предложение
+        собирается только у тех, у кого есть шанс, и в порядке прогноза.
         """
         if position.raw_acquired is None:
             return None
-        adapter = self._adapters.get(position.sell_provider_id.value)
-        if adapter is None:
+        adapters = self._exit_adapters(position, immediate=immediate)
+        if not adapters:
             return None
         # Ноль — это не «порог отключён», а «согласны на любой исход».
         # Отрицательные значения сюда не попадают: порог задан
@@ -373,13 +384,110 @@ class PositionWatcher:
         )
         if not self._exit_requires_profit:
             needed = None
+        candidates = await self._quote_exits(position, adapters, needed=needed)
+        if not candidates:
+            return None
         decimals = position.base_token.decimals
-        request = QuoteRequest(
+        #: Лучшее, что удалось посчитать **по обязательству**. Пока оно
+        #: не посчитано, в журнал ожидания идёт прогноз лидера: своего
+        #: значения выдавать за проверенное нельзя.
+        observed: int | None = None
+        observed_costs: int | None = None
+        for candidate in candidates:
+            # Кандидаты упорядочены по убыванию прогноза, поэтому первый
+            # непроходной закрывает и весь остаток списка.
+            if needed is not None and candidate.projected_profit < needed:
+                break
+            transaction = await self._build_offer(candidate.adapter, candidate.request)
+            costs = await self._exit_costs_raw(position, transaction)
+            if costs is None and needed is not None:
+                # Стоимость круга неизвестна. Продавать вслепую нельзя:
+                # неизвестный расход нулём не считается (``CLAUDE.md`` §12).
+                #
+                # Когда прибыль не требуется, неизвестная стоимость выходу
+                # не мешает: она влияет на решение, а решение уже принято.
+                return self._wait(
+                    position, profit=candidate.projected_profit, needed=needed, costs=None
+                )
+            # Решение принимается по тому, что агрегатор **обязуется**
+            # отдать, а не по тому, что обещает. Котировка — реклама,
+            # минимум — обязательство: ниже него обмен откатится он сам.
+            # Значит исполнение может выйти лучше расчёта, но не хуже.
+            profit = position.profit_if_sold_for(transaction.min_output_raw, raw_costs=costs or 0)
+            if needed is not None and profit < needed:
+                # Обязательство оказалось хуже прогноза. Это не конец
+                # проверки: следующий кандидат ещё может пройти, и его
+                # прогноз проверяется на входе в виток.
+                if observed is None or profit > observed:
+                    observed, observed_costs = profit, costs
+                continue
+            _LOGGER.info(
+                "exit offer verified",
+                extra=log_fields(
+                    t_id=str(position.t_id),
+                    provider=candidate.provider_id.value,
+                    surveyed=len(candidates),
+                    promised=str(Decimal(candidate.quote.output_amount.raw).scaleb(-decimals)),
+                    guaranteed=str(Decimal(transaction.min_output_raw).scaleb(-decimals)),
+                    profit=str(Decimal(profit).scaleb(-decimals)),
+                    # Прибыль может не требоваться вовсе — тогда порога нет,
+                    # и писать вместо него ноль значило бы солгать в журнале.
+                    needed=_money(None if needed is None else Decimal(needed).scaleb(-decimals)),
+                    gas=_money(None if costs is None else Decimal(costs).scaleb(-decimals)),
+                ),
+            )
+            await self._sell(
+                position.model_copy(
+                    update={
+                        # Продавец мог смениться: в ожидании выход
+                        # достаётся тому, кто дал лучшее предложение, и
+                        # доводить заявку до конца обязан он же.
+                        "sell_provider_id": candidate.provider_id,
+                        "sell_quoted_gas_units": candidate.quote.estimated_gas_units,
+                    }
+                ),
+                transaction,
+            )
+            return None
+        if needed is None:  # pragma: no cover - без порога выход уже состоялся
+            return None
+        return self._wait(
+            position,
+            profit=candidates[0].projected_profit if observed is None else observed,
+            needed=needed,
+            costs=observed_costs,
+        )
+
+    def _exit_adapters(
+        self, position: Position, *, immediate: bool
+    ) -> tuple[tuple[ProviderId, AggregatorAdapter], ...]:
+        """Кого спрашивать о выходе.
+
+        Немедленная проверка остаётся на назначенном продавце: маршрут
+        только что выбран проходом по свежим котировкам обеих ног, и
+        опрос остальных потратил бы запросы на уже известное. Отложенная
+        спрашивает всех включённых: назначение сделано минуты назад, а
+        деньги заперты сейчас (``the_main_rules.md``, правило 21).
+        """
+        if immediate:
+            adapter = self._adapters.get(position.sell_provider_id.value)
+            return () if adapter is None else ((position.sell_provider_id, adapter),)
+        return tuple(
+            (ProviderId(code), adapter) for code, adapter in sorted(self._adapters.items())
+        )
+
+    def _exit_request(self, position: Position, adapter: AggregatorAdapter) -> QuoteRequest:
+        """Запрос продажи всего купленного у одного агрегатора.
+
+        Допуск принадлежит форме исполнения: у транзакции промах стоит
+        газа, у подписанной заявки — ничего.
+        """
+        return QuoteRequest(
             network_id=position.network_id,
             operation=OperationType.SELL,
             input_token=position.target_token,
             output_token=position.base_token,
-            input_amount=position.target_token.amount_from_base_units(position.raw_acquired),
+            input_amount=position.target_token.amount_from_base_units(position.raw_acquired or 0),
             request_id=RequestId.generate(),
             slippage_bps=leg_slippage_bps(
                 adapter, transaction=self._slippage_bps, order=self._order_slippage_bps
@@ -389,48 +497,96 @@ class PositionWatcher:
             # (``the_main_rules.md``, правило 13).
             priority=_PRIORITY,
         )
-        quote = await adapter.get_quote(request)
-        # Котировка служит дешёвым отсевом: обязательство агрегатора её не
-        # превышает, поэтому круг, не окупающийся даже по обещанию, не
-        # окупится и по минимуму — собирать ради него транзакцию незачем.
-        gross = position.profit_if_sold_for(quote.output_amount.raw)
-        if needed is not None and gross < needed:
-            return self._wait(position, profit=gross, needed=needed, costs=None)
 
-        transaction = await self._build_offer(adapter, request)
-        costs = await self._exit_costs_raw(position, transaction)
-        if costs is None and needed is not None:
-            # Стоимость круга неизвестна. Продавать вслепую нельзя:
-            # неизвестный расход нулём не считается (``CLAUDE.md`` §12).
-            #
-            # Когда прибыль не требуется, неизвестная стоимость выходу не
-            # мешает: она влияет на решение, а решение уже принято.
-            return self._wait(position, profit=gross, needed=needed, costs=None)
-        # Решение принимается по тому, что агрегатор **обязуется** отдать,
-        # а не по тому, что обещает. Котировка — реклама, минимум —
-        # обязательство: ниже него обмен откатится он сам. Значит
-        # исполнение может выйти лучше расчёта, но не хуже.
-        profit = position.profit_if_sold_for(transaction.min_output_raw, raw_costs=costs or 0)
-        if needed is not None and profit < needed:
-            return self._wait(position, profit=profit, needed=needed, costs=costs)
-        _LOGGER.info(
-            "exit offer verified",
-            extra=log_fields(
-                t_id=str(position.t_id),
-                promised=str(Decimal(quote.output_amount.raw).scaleb(-decimals)),
-                guaranteed=str(Decimal(transaction.min_output_raw).scaleb(-decimals)),
-                profit=str(Decimal(profit).scaleb(-decimals)),
-                # Прибыль может не требоваться вовсе — тогда порога нет,
-                # и писать вместо него ноль значило бы солгать в журнале.
-                needed=_money(None if needed is None else Decimal(needed).scaleb(-decimals)),
-                gas=_money(None if costs is None else Decimal(costs).scaleb(-decimals)),
-            ),
+    async def _quote_exits(
+        self,
+        position: Position,
+        adapters: tuple[tuple[ProviderId, AggregatorAdapter], ...],
+        *,
+        needed: int | None,
+    ) -> tuple[ExitCandidate, ...]:
+        """Опросить кандидатов и упорядочить их по прогнозу.
+
+        Отказ одного не отменяет остальных: маршрута на этот токен у
+        агрегатора может не быть вовсе, и это его ответ, а не сбой
+        сделки. Единственный опрошенный при немедленной проверке ведёт
+        себя как прежде: не ответил — выход откладывается до такта.
+
+        Цена газа берётся один раз на весь опрос и только если она
+        кому-то понадобилась: она общая для всех кандидатов, а круг, не
+        окупающийся даже **без** газа, с газом тем более убыточен —
+        считать его расход незачем.
+        """
+        price: int | None = None
+        candidates: list[ExitCandidate] = []
+        for provider_id, adapter in adapters:
+            request = self._exit_request(position, adapter)
+            try:
+                quote = await adapter.get_quote(request)
+            except Exception as error:  # noqa: BLE001 - отказ выхода не сбой сделки
+                _LOGGER.info(
+                    "exit quote unavailable",
+                    extra=log_fields(
+                        t_id=str(position.t_id),
+                        provider=provider_id.value,
+                        error=type(error).__name__,
+                        detail=str(error),
+                    ),
+                )
+                continue
+            guaranteed = projected_output(
+                quote.output_amount.raw, slippage_bps=request.slippage_bps or 0
+            )
+            gross = position.profit_if_sold_for(guaranteed)
+            if needed is not None and gross < needed:
+                # Безнадёжен и без газа. Ни цена газа, ни пересчёт в
+                # базовый токен ему уже ничем не помогут.
+                candidates.append(
+                    ExitCandidate(
+                        provider_id=provider_id,
+                        adapter=adapter,
+                        request=request,
+                        quote=quote,
+                        projected_profit=gross,
+                        gas_known=False,
+                        viable=False,
+                    )
+                )
+                continue
+            if price is None:
+                price = await self._account.gas_price(position.network_id, priority=_PRIORITY)
+            units = 0 if executes_with_orders(adapter) else quote.estimated_gas_units
+            costs = await self._projected_costs_raw(position, units=units, price=price)
+            candidates.append(
+                ExitCandidate(
+                    provider_id=provider_id,
+                    adapter=adapter,
+                    request=request,
+                    quote=quote,
+                    projected_profit=position.profit_if_sold_for(guaranteed, raw_costs=costs or 0),
+                    gas_known=costs is not None,
+                )
+            )
+        return rank_exits(candidates)
+
+    async def _projected_costs_raw(
+        self, position: Position, *, units: int | None, price: int
+    ) -> int | None:
+        """Во что обойдётся круг по оценке котировки.
+
+        От :meth:`_exit_costs_raw` отличается только источником предела
+        газа: там он взят у собранного предложения, здесь — у котировки.
+        Служит порядку опроса, а не решению: решение принимается по
+        собранному предложению и по его же расходу.
+        """
+        if units is None:
+            return None
+        total_wei = _total_wei(position.buy_gas_wei, position.sell_gas_wei, units * price)
+        if total_wei is None:
+            return None
+        return await self._costs.to_base_raw(
+            position.network_id, position.base_token, wei=total_wei
         )
-        await self._sell(
-            position.model_copy(update={"sell_quoted_gas_units": quote.estimated_gas_units}),
-            transaction,
-        )
-        return None
 
     async def _build_offer(
         self, adapter: AggregatorAdapter, request: QuoteRequest

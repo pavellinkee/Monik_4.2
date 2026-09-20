@@ -17,6 +17,7 @@ from monik.services.trading.chain import (
     TransactionReceipt,
 )
 from monik.services.trading.executor import TradeExecutor
+from monik.services.trading.exits import ExitCandidate, projected_output, rank_exits
 from monik.services.trading.ports import PositionStore, SequenceSource
 from monik.services.trading.sender import SentTransaction, TransactionSender
 from monik.services.trading.wallet import TradingWallet
@@ -36,6 +37,9 @@ __all__ = [
     "TradingWallet",
     "TransactionReceipt",
     "TransactionSender",
+    "ExitCandidate",
     "encode_approve",
     "encode_permit2_approve",
+    "projected_output",
+    "rank_exits",
 ]

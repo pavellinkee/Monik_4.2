@@ -812,4 +812,3 @@ class TestExitWithoutProfit:
         await watcher.tick()
 
         assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
-
