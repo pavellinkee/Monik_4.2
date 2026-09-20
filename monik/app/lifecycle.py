@@ -672,6 +672,39 @@ def _search_allowed(container: Container, mode: ScanMode) -> bool:
     return switch.is_open
 
 
+async def _budget_allows(container: Container, mode: ScanMode) -> bool:
+    """Есть ли на что торговать прямо сейчас.
+
+    Пока весь остаток заперт в непроданной позиции, любая находка всё
+    равно будет отброшена по остатку: исполнитель проверяет средства
+    перед покупкой и до неё не доходит. Проход в этом положении тратит
+    квоту агрегаторов на заведомо неисполнимое, поэтому он не делается.
+
+    Сухой проход это не касается. Когда торговля **запрещена
+    конфигурацией**, деньги не тратятся вовсе, и правило 11 прямо
+    разрешает «искать, не торгуя»: остаток счёта такому проходу не указ.
+
+    Стоимость самой проверки — один запрос остатка у узла сети и одно
+    обращение к хранилищу сделок. К агрегаторам она не ходит.
+    """
+    if mode is not ScanMode.ANN:
+        return True
+    switch = container.trading
+    executor = container.executor
+    if switch is None or not switch.allowed or executor is None:
+        return True
+    scopes = container.level1.scopes(mode)
+    if not scopes:
+        # Проходу и так нечего делать; причину назовёт проверка
+        # работающих провайдеров, и подменять её остатком незачем.
+        return True
+    for scope in scopes:
+        for network_id in scope.networks:
+            if await executor.has_room(network_id, scope.raw_amounts):
+                return True
+    return False
+
+
 def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
     """Проход Level 1 в заданном режиме.
 
@@ -696,6 +729,15 @@ def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
             # агрегаторов и держать их под нагрузкой впустую.
             _LOGGER.info(
                 "scan skipped: trading is stopped",
+                extra=log_fields(mode=mode.value),
+            )
+            return
+        if not await _budget_allows(container, mode):
+            # Весь свободный остаток заперт в открытых сделках. Искать
+            # то, что заведомо не купить, значит тратить квоту
+            # агрегаторов впустую.
+            _LOGGER.info(
+                "scan skipped: the balance is committed to open trades",
                 extra=log_fields(mode=mode.value),
             )
             return

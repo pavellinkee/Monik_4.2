@@ -227,6 +227,21 @@ class TradeExecutor:
             return None
         return _Choice(candidate=candidate, target=target, base=base)
 
+    async def has_room(self, network_id: NetworkId, raw_amounts: tuple[int, ...]) -> bool:
+        """Хватает ли свободных денег хотя бы на одну настроенную сумму.
+
+        Свободные — это остаток базового токена за вычетом обещанного
+        уже открытым сделкам. Пока деньги заперты в непроданной позиции,
+        любая находка всё равно будет отброшена по остатку, и искать её
+        значит впустую тратить квоту агрегаторов.
+
+        Набор сумм проверяется целиком: если не проходит самая малая, не
+        пройдёт ни одна.
+        """
+        if not raw_amounts:
+            return False
+        return await self._available(network_id) >= min(raw_amounts)
+
     async def _available(self, network_id: NetworkId) -> int:
         """Свободный остаток базового токена сети.
 

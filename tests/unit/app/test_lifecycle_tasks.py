@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import pytest
 
 from monik.app.control import TradingSwitch
-from monik.app.lifecycle import _search_allowed
+from monik.app.lifecycle import _budget_allows, _search_allowed
 from monik.domain.enums.modes import ScanMode
 
 
@@ -82,3 +82,105 @@ class TestOtherModesAreUntouched:
         container = _Container(trading=_switch(allowed=True, started=False))
 
         assert _search_allowed(container, mode) is True  # type: ignore[arg-type]
+
+
+@dataclass
+class _Scope:
+    """Границы прохода: сети и суммы — всё, что нужно правилу остатка."""
+
+    networks: tuple[str, ...]
+    raw_amounts: tuple[int, ...]
+
+
+class _Level1:
+    def __init__(self, scopes: tuple[_Scope, ...]) -> None:
+        self._scopes = scopes
+
+    def scopes(self, mode: ScanMode) -> tuple[_Scope, ...]:  # noqa: ARG002
+        return self._scopes
+
+
+class _Executor:
+    """Исполнитель, у которого остаток задан заранее."""
+
+    def __init__(self, room: bool) -> None:
+        self._room = room
+        self.asked: list[tuple[str, tuple[int, ...]]] = []
+
+    async def has_room(self, network_id: str, raw_amounts: tuple[int, ...]) -> bool:
+        self.asked.append((network_id, raw_amounts))
+        return self._room
+
+
+@dataclass
+class _BudgetContainer:
+    trading: TradingSwitch | None
+    executor: _Executor | None
+    level1: _Level1
+
+
+def _budget_container(
+    *, allowed: bool = True, room: bool = True, scopes: tuple[_Scope, ...] | None = None
+) -> _BudgetContainer:
+    return _BudgetContainer(
+        trading=_switch(allowed=allowed, started=True),
+        executor=_Executor(room),
+        level1=_Level1(scopes if scopes is not None else (_Scope(("polygon",), (100_000_000,)),)),
+    )
+
+
+class TestBudgetStopsTheSearch:
+    """Проход не начинается, когда покупать не на что.
+
+    Исполнитель всё равно отбросит находку по остатку, и опрашивать
+    ради неё агрегаторов — тратить их квоту впустую.
+    """
+
+    async def test_a_locked_balance_stops_the_trading_search(self) -> None:
+        container = _budget_container(room=False)
+
+        assert await _budget_allows(container, ScanMode.ANN) is False  # type: ignore[arg-type]
+
+    async def test_a_free_balance_allows_the_search(self) -> None:
+        container = _budget_container(room=True)
+
+        assert await _budget_allows(container, ScanMode.ANN) is True  # type: ignore[arg-type]
+
+    async def test_one_network_with_room_is_enough(self) -> None:
+        """Занятость одной сети не отменяет прохода по другой."""
+        container = _budget_container(
+            room=True,
+            scopes=(_Scope(("polygon",), (100_000_000,)), _Scope(("arbitrum",), (100_000_000,))),
+        )
+
+        assert await _budget_allows(container, ScanMode.ANN) is True  # type: ignore[arg-type]
+
+    async def test_other_modes_are_untouched(self) -> None:
+        """``ur`` и ``fest`` денег не тратят, и остаток им не указ."""
+        container = _budget_container(room=False)
+
+        assert await _budget_allows(container, ScanMode.FEST) is True  # type: ignore[arg-type]
+        assert await _budget_allows(container, ScanMode.UR) is True  # type: ignore[arg-type]
+
+    async def test_the_dry_run_survives_a_locked_balance(self) -> None:
+        """Сухой прогон ищет и при нулевом остатке.
+
+        Когда торговля запрещена конфигурацией, деньги не тратятся
+        вовсе: правило 11 прямо разрешает «искать, не торгуя».
+        """
+        container = _budget_container(allowed=False, room=False)
+
+        assert await _budget_allows(container, ScanMode.ANN) is True  # type: ignore[arg-type]
+        assert container.executor is not None
+        assert container.executor.asked == [], "остаток у исполнителя не спрашивали"
+
+    async def test_no_scope_leaves_the_reason_to_the_next_check(self) -> None:
+        """Пустой набор границ — не про остаток.
+
+        Причину назовёт проверка работающих провайдеров, и подменять её
+        сообщением о занятых деньгах нельзя: оператор пошёл бы чинить не
+        то.
+        """
+        container = _budget_container(room=False, scopes=())
+
+        assert await _budget_allows(container, ScanMode.ANN) is True  # type: ignore[arg-type]

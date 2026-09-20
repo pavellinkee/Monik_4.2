@@ -23,8 +23,9 @@ from monik.domain.enums.trading import PositionStatus
 from monik.domain.errors import DataError
 from monik.domain.models.execution import OrderOutcome, OrderState
 from monik.domain.models.opportunity import Candidate
+from monik.domain.models.position import Position
 from monik.domain.models.scan import Scan, ScanScope
-from monik.domain.value_objects.identifiers import ScanId
+from monik.domain.value_objects.identifiers import ScanId, TId
 from monik.infrastructure.providers.contract import AdapterCapabilities
 from monik.infrastructure.providers.fake import FakeAdapter
 from monik.services.calculator import ProfitCalculator
@@ -892,3 +893,61 @@ class TestNothingSentWording:
         assert "trade closed without a buy: nothing was ever sent" in messages
         assert "trade failed: the buy transaction reverted" not in messages
         assert "trade closed without a buy: the order was not filled" not in messages
+
+
+def _open_position(raw_input: int) -> Position:
+    """Открытая сделка, занявшая часть остатка."""
+    return Position(
+        t_id=TId.from_sequence(1),
+        network_id=f.POLYGON,
+        status=PositionStatus.HOLDING,
+        base_token=f.USDT,
+        target_token=f.AAVE,
+        buy_provider_id=ProviderId.UNISWAP,
+        sell_provider_id=ProviderId.UNISWAP,
+        raw_input=raw_input,
+        raw_acquired=1,
+        opened_at=f.NOW,
+    )
+
+
+class TestRoom:
+    """Свободный остаток решает, стоит ли вообще начинать проход.
+
+    Пока деньги заперты в непроданной позиции, любая находка всё равно
+    будет отброшена по остатку, и искать её — тратить квоту агрегаторов
+    впустую.
+    """
+
+    async def test_a_free_balance_leaves_room(self) -> None:
+        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        executor = _executor(node, MemoryPositions())
+
+        assert await executor.has_room(f.POLYGON, (50_000_000,)) is True
+
+    async def test_an_open_trade_takes_the_room_away(self) -> None:
+        """Обещанное открытой сделке из остатка вычитается.
+
+        Иначе одни и те же деньги считались бы свободными дважды.
+        """
+        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        positions = MemoryPositions()
+        await positions.create(_open_position(50_000_000))
+        executor = _executor(node, positions)
+
+        assert await executor.has_room(f.POLYGON, (50_000_000,)) is False
+
+    async def test_the_smallest_amount_decides(self) -> None:
+        """Не проходит самая малая сумма — не пройдёт ни одна."""
+        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        executor = _executor(node, MemoryPositions())
+
+        assert await executor.has_room(f.POLYGON, (50_000_000, 500_000_000)) is True
+        assert await executor.has_room(f.POLYGON, (70_000_000, 500_000_000)) is False
+
+    async def test_no_amounts_means_no_room(self) -> None:
+        """Пустой набор сумм торговать не на что."""
+        node = ScriptedNode(balances={USDT_ADDRESS: 60_000_000})
+        executor = _executor(node, MemoryPositions())
+
+        assert await executor.has_room(f.POLYGON, ()) is False
