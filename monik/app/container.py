@@ -1295,6 +1295,7 @@ def _build_reporter(
         trading_state=switch.state,
         threshold_percent=config.profitability.threshold_for(ScanMode.ANN),
         balance=balance,
+        timezone=config.application.timezone,
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from monik.domain.enums.providers import ProviderId
 from monik.domain.enums.trading import PositionStatus
@@ -313,3 +314,51 @@ class TestDrift:
 
         assert await reporter.tick() is True
         assert "15:00–15:30" in notifier.sent[1]
+
+
+class TestOperatorTimezone:
+    """Отчёт читает человек по своим часам.
+
+    Внутри системы время живёт в UTC. Без перевода заголовок расходился
+    бы и с часами оператора, и с журналом, который пояс уже учитывает
+    (``the_main_rules.md``, правило 7).
+    """
+
+    def test_the_header_is_written_in_the_operator_timezone(self) -> None:
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(),
+            open_now=(),
+            scans=ScanSummary(passes=60, best_net_roi=None),
+            timezone=ZoneInfo("Europe/Lisbon"),
+        )
+
+        # SINCE задан в UTC; в Лиссабоне зимой это то же время, летом — на час больше.
+        shift = SINCE.astimezone(ZoneInfo("Europe/Lisbon")).hour - SINCE.hour
+        assert f"{12 + shift:02d}:00–{12 + shift:02d}:30" in text
+
+    def test_without_a_timezone_the_header_stays_in_utc(self) -> None:
+        """Пояс не задан — подменять его догадкой нельзя."""
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(),
+            open_now=(),
+            scans=ScanSummary(passes=60, best_net_roi=None),
+        )
+
+        assert "12:00–12:30" in text
+
+    async def test_the_reporter_carries_the_configured_timezone(self) -> None:
+        """Пояс доходит от конфигурации до текста, а не теряется по пути."""
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        reporter = _reporter(clock, notifier, timezone="Asia/Tokyo")
+        await reporter.tick()
+        clock.advance(timedelta(minutes=30))
+
+        assert await reporter.tick() is True
+        assert "21:00–21:30" in notifier.sent[0], "12:00 UTC — это 21:00 в Токио"

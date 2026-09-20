@@ -14,9 +14,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import timedelta, tzinfo
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from monik.domain.models.position import Position
 from monik.domain.models.scan import ScanSummary
@@ -62,6 +63,17 @@ class ScanSummarySource(Protocol):
         ...
 
 
+def _local(moment: UtcDatetime, timezone: tzinfo | None) -> str:
+    """Время в поясе оператора.
+
+    Внутри системы время живёт в UTC, а читает отчёт человек по своим
+    часам. Без перевода заголовок расходился бы и с часами оператора, и
+    с журналом, который пояс уже учитывает (``the_main_rules.md``,
+    правило 7).
+    """
+    return (moment if timezone is None else moment.astimezone(timezone)).strftime("%H:%M")
+
+
 def report_text(
     *,
     since: UtcDatetime,
@@ -73,6 +85,7 @@ def report_text(
     threshold_percent: Decimal | None = None,
     balance: Decimal | None = None,
     balance_symbol: str = "",
+    timezone: tzinfo | None = None,
 ) -> str:
     """Собрать текст отчёта.
 
@@ -80,7 +93,7 @@ def report_text(
     сети, и проверять его так проще, чем собирать окружение.
     """
     lines = [
-        f"📊 Отчёт ann за {since.strftime('%H:%M')}–{until.strftime('%H:%M')}",
+        f"📊 Отчёт ann за {_local(since, timezone)}–{_local(until, timezone)}",
         f"Торговля: {trading_state}",
     ]
     if closed:
@@ -139,6 +152,7 @@ class TradeReporter:
         "_scans",
         "_sent_until",
         "_threshold",
+        "_timezone",
         "_trading_state",
     )
 
@@ -153,6 +167,7 @@ class TradeReporter:
         trading_state: Callable[[], str],
         threshold_percent: Decimal | None = None,
         balance: Callable[[], Awaitable[tuple[Decimal, str] | None]] | None = None,
+        timezone: str | None = None,
     ) -> None:
         self._positions = positions
         self._scans = scans
@@ -162,6 +177,9 @@ class TradeReporter:
         self._trading_state = trading_state
         self._threshold = threshold_percent
         self._balance = balance
+        #: Пояс, в котором оператор читает время. Без него заголовок
+        #: остался бы в UTC и расходился бы с его часами.
+        self._timezone = ZoneInfo(timezone) if timezone else None
         #: Конец последнего отчётного промежутка. Промежутки стыкуются
         #: встык: иначе сделка, завершившаяся между ними, не попала бы
         #: ни в один отчёт.
@@ -229,4 +247,5 @@ class TradeReporter:
             threshold_percent=self._threshold,
             balance=balance,
             balance_symbol=symbol,
+            timezone=self._timezone,
         )
