@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from monik import version_label
 from monik.app.control import ScannerSwitch, TradingSwitch
+from monik.app.trade_buttons import sell_buttons_for
 from monik.config.loader import LoadedConfiguration
 from monik.config.root import Configuration
 from monik.config.secrets import SecretValue
@@ -1317,6 +1318,9 @@ def _build_reporter(
         threshold_percent=config.profitability.threshold_for(ScanMode.ANN),
         balance=balance,
         timezone=config.application.timezone,
+        # Формат данных кнопки принадлежит подсистеме команд: отчёт их
+        # не строит, а получает готовыми.
+        buttons=sell_buttons_for,
     )
 
 

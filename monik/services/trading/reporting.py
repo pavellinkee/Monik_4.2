@@ -22,10 +22,22 @@ from zoneinfo import ZoneInfo
 from monik.domain.models.position import Position
 from monik.domain.models.scan import ScanSummary
 from monik.domain.value_objects.timestamps import UtcDatetime
+from monik.services.notifications.ports import MessageButton
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 
-__all__ = ["OperatorNotifier", "TradeReporter", "closing_text", "report_text"]
+__all__ = [
+    "OperatorNotifier",
+    "TradeReporter",
+    "closing_text",
+    "money",
+    "percent",
+    "report_text",
+]
+
+#: Чем снабдить отчёт с открытыми сделками. Принимает открытые сделки,
+#: возвращает ряды кнопок.
+ButtonsForPositions = Callable[[tuple[Position, ...]], tuple[tuple[MessageButton, ...], ...]]
 
 _LOGGER = get_logger("services.trading.reporting")
 
@@ -49,11 +61,17 @@ class ClosedPositions(Protocol):
 class OperatorNotifier(Protocol):
     """Канал сообщений оператору."""
 
-    async def notify_operator(self, text: str) -> bool:
-        """Отправить произвольное сообщение.
+    async def notify_operator(
+        self,
+        text: str,
+        *,
+        buttons: tuple[tuple[MessageButton, ...], ...] = (),
+    ) -> bool:
+        """Отправить произвольное сообщение, возможно с кнопками.
 
-        Кнопки здесь не нужны: отчёт ничего не предлагает сделать. У
-        реализации параметр есть, и протокол его не запрещает.
+        Какие кнопки предложить, решает вызывающая сторона: система
+        уведомлений о наборе действий не знает
+        (``15_NOTIFICATION_SYSTEM.md`` §6).
         """
         ...
 
@@ -65,6 +83,51 @@ class ScanSummarySource(Protocol):
     async def summary_between(self, *, since: UtcDatetime, until: UtcDatetime) -> ScanSummary:
         """Сводка проходов за промежуток."""
         ...
+
+
+#: Сколько знаков после запятой видит оператор. Решение оператора
+#: 21.09: шесть знаков в сообщении читать невозможно, а решения по ним
+#: он не принимает.
+_SHOWN_DIGITS = 2
+
+
+def money(value: Decimal, *, sign: bool = False) -> str:
+    """Денежная величина в том виде, в каком её читает человек.
+
+    Два знака после запятой. Исключение одно: величина, которая при
+    округлении до двух знаков стала бы нулём, показывается с точностью,
+    достаточной чтобы остаться собой. Иначе сообщение «Итог: +0.00»
+    приходило бы на каждую сделку: заработок круга на стейблкоинах
+    измеряется тысячными долями, и округление превратило бы отчёт в
+    рассказ ни о чём.
+
+    Ноль остаётся нулём: у него скрывать нечего.
+    """
+    shown = round(value, _SHOWN_DIGITS)
+    if shown == 0 and value != 0:
+        # Ищем первый знак, на котором величина перестаёт быть нулём.
+        digits = _SHOWN_DIGITS
+        while digits < 18 and round(value, digits) == 0:
+            digits += 1
+        shown = round(value, digits)
+    text = f"{shown:{'+' if sign else ''}f}"
+    return text
+
+
+#: Знаки процентной величины. Больше денежных нарочно: порог режима
+#: равен 0,01 %, и находка 0,0132 % при двух знаках стала бы от него
+#: неотличима — а отчёт затем и нужен, чтобы видеть, насколько близко
+#: подходило.
+_PERCENT_DIGITS = 4
+
+
+def percent(value: Decimal, *, sign: bool = False) -> str:
+    """Процентная величина в том виде, в каком её читает человек.
+
+    Процент — не деньги: его сравнивают с порогом, а не считают в
+    кошельке, и округление до копеек лишило бы сравнение смысла.
+    """
+    return f"{round(value, _PERCENT_DIGITS):{'+' if sign else ''}f}"
 
 
 def _local(moment: UtcDatetime, timezone: tzinfo | None) -> str:
@@ -96,16 +159,16 @@ def closing_text(position: Position) -> str:
     lines = [
         f"{'✅' if net is not None and net >= 0 else '🔻'} {position.t_id} завершена: "
         f"{symbol} → {position.target_token.symbol} → {symbol}",
-        f"Вложено: {position.input_amount:f} {symbol}",
+        f"Вложено: {money(position.input_amount)} {symbol}",
     ]
     returned = position.raw_returned
     if returned is not None:
-        lines.append(f"Вернулось: {Decimal(returned).scaleb(-decimals):f} {symbol}")
+        lines.append(f"Вернулось: {money(Decimal(returned).scaleb(-decimals))} {symbol}")
     if position.raw_gas_cost is not None:
-        lines.append(f"Газ: {Decimal(position.raw_gas_cost).scaleb(-decimals):f} {symbol}")
+        lines.append(f"Газ: {money(Decimal(position.raw_gas_cost).scaleb(-decimals))} {symbol}")
     # Неизвестный итог не превращается в ноль: он бы тихо улучшил
     # картину (``CLAUDE.md`` §12).
-    lines.append("Итог: неизвестен" if net is None else f"Итог: {net:+f} {symbol}")
+    lines.append("Итог: неизвестен" if net is None else f"Итог: {money(net, sign=True)} {symbol}")
     lines.append(f"Круг: {position.buy_provider_id.value} → {position.sell_provider_id.value}")
     if position.closed_at is not None:
         hours = (position.closed_at - position.opened_at).total_seconds() / 3600
@@ -146,13 +209,13 @@ def report_text(
                 shown = "итог неизвестен"
             else:
                 total += result
-                shown = f"{result:+f}"
+                shown = money(result, sign=True)
             lines.append(
                 f"  {position.t_id} {position.buy_provider_id.value}→"
                 f"{position.sell_provider_id.value} {position.target_token.symbol} "
-                f"{position.input_amount:f} → {shown}"
+                f"{money(position.input_amount)} → {shown}"
             )
-        lines.append(f"Итог промежутка: {total:+f} {closed[0].base_token.symbol}")
+        lines.append(f"Итог промежутка: {money(total, sign=True)} {closed[0].base_token.symbol}")
         if unknown:
             # Неизвестный итог не превращается в ноль: он бы тихо
             # улучшил сводку (``CLAUDE.md`` §12).
@@ -164,18 +227,18 @@ def report_text(
         for position in open_now:
             lines.append(
                 f"  {position.t_id} {position.target_token.symbol} "
-                f"{position.input_amount:f} — {position.status.value}"
+                f"{money(position.input_amount)} — {position.status.value}"
             )
     else:
         lines.append("Открыто сейчас: нет")
     found = f"Проходов: {scans.passes}"
     if scans.best_net_roi is not None:
-        found += f", лучшая находка {scans.best_net_roi:+f} %"
+        found += f", лучшая находка {percent(scans.best_net_roi, sign=True)} %"
         if threshold_percent is not None:
-            found += f" при пороге {threshold_percent:f} %"
+            found += f" при пороге {percent(threshold_percent)} %"
     lines.append(found)
     if balance is not None:
-        lines.append(f"Остаток: {balance:f} {balance_symbol}")
+        lines.append(f"Остаток: {money(balance)} {balance_symbol}")
     return "\n".join(lines)
 
 
@@ -191,6 +254,7 @@ class TradeReporter:
         "_scans",
         "_sent_until",
         "_threshold",
+        "_buttons",
         "_timezone",
         "_trading_state",
     )
@@ -207,6 +271,7 @@ class TradeReporter:
         threshold_percent: Decimal | None = None,
         balance: Callable[[], Awaitable[tuple[Decimal, str] | None]] | None = None,
         timezone: str | None = None,
+        buttons: ButtonsForPositions | None = None,
     ) -> None:
         self._positions = positions
         self._scans = scans
@@ -219,6 +284,10 @@ class TradeReporter:
         #: Пояс, в котором оператор читает время. Без него заголовок
         #: остался бы в UTC и расходился бы с его часами.
         self._timezone = ZoneInfo(timezone) if timezone else None
+        #: Чем снабдить отчёт, в котором есть открытые сделки. Формат
+        #: данных кнопки принадлежит подсистеме команд, а не отчёту,
+        #: поэтому он их не строит, а получает готовыми.
+        self._buttons = buttons
         #: Конец последнего отчётного промежутка. Промежутки стыкуются
         #: встык: иначе сделка, завершившаяся между ними, не попала бы
         #: ни в один отчёт.
@@ -252,23 +321,28 @@ class TradeReporter:
             until = now
         self._sent_until = until
         try:
-            text = await self._compose(since, until)
+            open_now = await self._positions.open_positions()
+            text = await self._compose(since, until, open_now)
         except Exception as error:  # noqa: BLE001 - отчёт не должен ронять работу
             _LOGGER.error(
                 "trade report could not be composed",
                 extra=log_fields(error=type(error).__name__, detail=str(error)),
             )
             return False
-        sent = await self._notify.notify_operator(text)
+        # Открытая сделка в отчёте — повод её закрыть, а не только повод
+        # о ней прочитать (``the_main_rules.md``, правило 25).
+        buttons = () if self._buttons is None else self._buttons(open_now)
+        sent = await self._notify.notify_operator(text, buttons=buttons)
         _LOGGER.info(
             "trade report sent" if sent else "trade report not delivered",
             extra=log_fields(since=since.isoformat(), until=until.isoformat()),
         )
         return bool(sent)
 
-    async def _compose(self, since: UtcDatetime, until: UtcDatetime) -> str:
+    async def _compose(
+        self, since: UtcDatetime, until: UtcDatetime, open_now: tuple[Position, ...]
+    ) -> str:
         closed = await self._positions.closed_between(since=since, until=until)
-        open_now = await self._positions.open_positions()
         scans = await self._scans.summary_between(since=since, until=until)
         balance: Decimal | None = None
         symbol = ""

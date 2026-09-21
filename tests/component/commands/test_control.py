@@ -498,8 +498,8 @@ class TestManualExit:
 
         response = await router.handle_callback(sell_callback_data("#T41"))
 
-        assert "99.674145 USDT" in response.text, "названа цена продажи"
-        assert "-0.325855 USDT" in response.text, "назван итог сделки"
+        assert "99.67 USDT" in response.text, "названа цена продажи, два знака"
+        assert "-0.33 USDT" in response.text, "назван итог сделки"
         assert "cow" in response.text, "назван продавец"
 
     async def test_an_unknown_gas_cost_is_not_hidden(self, database: Database) -> None:
@@ -518,7 +518,7 @@ class TestManualExit:
 
         assert exits.sold == ["#T41"], "продана именно эта сделка"
         assert "продана" in response.text
-        assert "99.674145 USDT" in response.text
+        assert "99.67 USDT" in response.text
 
     async def test_the_button_carries_its_own_trade(self, database: Database) -> None:
         """Уведомлений может висеть несколько, и нажатое относится к своему."""

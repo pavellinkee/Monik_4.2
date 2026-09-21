@@ -17,7 +17,8 @@ from dataclasses import dataclass
 import pytest
 
 from monik.app.control import TradingSwitch
-from monik.app.lifecycle import _budget_allows, _search_allowed, _sell_buttons
+from monik.app.lifecycle import _budget_allows, _search_allowed
+from monik.app.trade_buttons import sell_buttons
 from monik.domain.enums.modes import ScanMode
 
 
@@ -194,14 +195,12 @@ class TestLongWaitButton:
     """
 
     def test_the_notice_carries_a_sell_button(self) -> None:
-        rows = _sell_buttons("#T41")
+        rows = sell_buttons("#T41")
 
         labels = [button.label for row in rows for button in row]
         assert labels == ["💸 Продать по текущей цене"]
 
     def test_the_button_names_its_own_trade(self) -> None:
         """Уведомлений может висеть несколько, и каждое ведёт к своему."""
-        assert (
-            _sell_buttons("#T41")[0][0].callback_data != _sell_buttons("#T42")[0][0].callback_data
-        )
-        assert "#T41" in _sell_buttons("#T41")[0][0].callback_data
+        assert sell_buttons("#T41")[0][0].callback_data != sell_buttons("#T42")[0][0].callback_data
+        assert "#T41" in sell_buttons("#T41")[0][0].callback_data

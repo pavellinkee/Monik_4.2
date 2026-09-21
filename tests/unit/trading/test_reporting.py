@@ -19,7 +19,13 @@ from monik.domain.models.position import Position
 from monik.domain.models.scan import ScanSummary
 from monik.domain.value_objects.identifiers import TId
 from monik.services.observability import FakeClock
-from monik.services.trading.reporting import TradeReporter, closing_text, report_text
+from monik.services.trading.reporting import (
+    TradeReporter,
+    closing_text,
+    money,
+    percent,
+    report_text,
+)
 from tests import factories as f
 
 SINCE = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -62,7 +68,7 @@ class TestText:
         assert "Торговля: идёт" in text
         assert "#T16" in text
         assert "cow→uniswap" in text
-        assert "+0.013084" in text
+        assert "+0.01" in text, "деньги — два знака"
 
     def test_a_quiet_period_still_says_how_close_it_got(self) -> None:
         """Иначе «сделок нет» не отличить от «система встала»."""
@@ -120,18 +126,19 @@ class TestText:
             balance_symbol="USDT",
         )
 
-        assert "Остаток: 108.617565 USDT" in text
+        assert "Остаток: 108.62 USDT" in text
 
 
 class _Positions:
     def __init__(self) -> None:
         self.closed: tuple[Position, ...] = ()
+        self.open_items: tuple[Position, ...] = ()
 
     async def closed_between(self, *, since: object, until: object) -> tuple[Position, ...]:
         return self.closed
 
     async def open_positions(self) -> tuple[Position, ...]:
-        return ()
+        return self.open_items
 
 
 class _Scans:
@@ -142,8 +149,10 @@ class _Scans:
 class _Notifier:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.buttons: object = ()
 
-    async def notify_operator(self, text: str) -> bool:
+    async def notify_operator(self, text: str, *, buttons: object = ()) -> bool:
+        self.buttons = buttons
         self.sent.append(text)
         return True
 
@@ -379,10 +388,12 @@ class TestClosingNotice:
         )
 
         assert "#T16" in text
-        assert "Вложено: 100.000000" in text
-        assert "Вернулось: 100.016907" in text
-        assert "Газ: 0.016375" in text
-        assert "Итог: +0.000532" in text
+        assert "Вложено: 100.00 USDT" in text, "суммы — два знака"
+        assert "Вернулось: 100.02 USDT" in text
+        assert "Газ: 0.02 USDT" in text
+        # Итог меньше копейки, и два знака превратили бы его в ноль:
+        # заработок круга на стейблкоинах измеряется тысячными.
+        assert "Итог: +0.001 USDT" in text
 
     def test_a_profitable_trade_is_marked_as_such(self) -> None:
         text = closing_text(
@@ -398,7 +409,7 @@ class TestClosingNotice:
         )
 
         assert text.startswith("🔻")
-        assert "Итог: -0.116375" in text
+        assert "Итог: -0.12 USDT" in text
 
     def test_an_unknown_result_is_not_a_zero(self) -> None:
         """Неизвестный итог нулём не считается (``CLAUDE.md`` §12)."""
@@ -416,3 +427,73 @@ class TestClosingNotice:
 
         assert "Круг: cow → uniswap" in text
         assert "Длилась:" in text
+
+
+class TestNumberFormat:
+    """Числа в сообщении читает человек.
+
+    Решение оператора 21.09: после запятой две цифры. Шесть знаков в
+    сообщении читать невозможно, а решений по ним он не принимает.
+    """
+
+    def test_money_shows_two_digits(self) -> None:
+        assert money(Decimal("100.000000")) == "100.00"
+        assert money(Decimal("9.359258")) == "9.36"
+        assert money(Decimal("-0.116375")) == "-0.12"
+
+    def test_money_keeps_a_sign_when_asked(self) -> None:
+        assert money(Decimal("0.12"), sign=True) == "+0.12"
+        assert money(Decimal("-0.12"), sign=True) == "-0.12"
+
+    def test_money_never_rounds_a_result_into_nothing(self) -> None:
+        """Иначе «Итог: +0.00» приходил бы на каждую сделку.
+
+        Заработок круга на стейблкоинах измеряется тысячными долями:
+        округление до копеек превратило бы отчёт в рассказ ни о чём.
+        """
+        assert money(Decimal("0.000532"), sign=True) == "+0.001"
+        assert money(Decimal("-0.0000001")) == "-0.0000001"
+
+    def test_zero_stays_zero(self) -> None:
+        """У нуля скрывать нечего."""
+        assert money(Decimal("0")) == "0.00"
+
+    def test_percent_keeps_more_digits_than_money(self) -> None:
+        """Порог режима равен 0,01 %, и находка должна быть от него отличима."""
+        assert percent(Decimal("0.0132"), sign=True) == "+0.0132"
+        assert percent(Decimal("0.01")) == "0.0100"
+
+
+class TestReportButtons:
+    """Отчёт с открытой сделкой несёт кнопку её закрытия."""
+
+    async def test_an_open_trade_puts_a_button_under_the_report(self) -> None:
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        positions = _Positions()
+        positions.open_items = (_position(status=PositionStatus.HOLDING, closed_at=None),)
+        reporter = _reporter(
+            clock,
+            notifier,
+            positions=positions,
+            buttons=lambda items: tuple(
+                ((f"кнопка {item.t_id}",),)
+                for item in items  # type: ignore[misc]
+            )[0:1],
+        )
+        await reporter.tick()
+        clock.advance(timedelta(minutes=30))
+
+        assert await reporter.tick() is True
+        assert notifier.buttons, "кнопка приложена к отчёту"
+
+    async def test_a_quiet_report_carries_nothing(self) -> None:
+        """Закрывать нечего — и предлагать нечего."""
+        clock = FakeClock(SINCE)
+        notifier = _Notifier()
+        reporter = _reporter(clock, notifier, buttons=lambda items: ())
+        await reporter.tick()
+        clock.advance(timedelta(minutes=30))
+
+        assert await reporter.tick() is True
+        assert not notifier.buttons

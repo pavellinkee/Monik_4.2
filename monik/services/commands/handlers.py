@@ -52,6 +52,7 @@ from monik.services.commands.ports import (
 from monik.services.notifications.ports import MessageButton
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.exits import ExitQuote
+from monik.services.trading.reporting import money
 from monik.services.updates.ports import SystemUpdater
 
 __all__ = ["COMMAND_HELP", "CommandResponse", "CommandRouter"]
@@ -650,8 +651,8 @@ def sell_prompt(offer: ExitQuote) -> str:
     с деньгами, и видеть он должен то, что ему гарантированно отдадут.
     """
     lines = [
-        f"{offer.t_id}: продать сейчас за {offer.output} {offer.symbol}?",
-        f"Итог сделки: {offer.profit:+} {offer.symbol}",
+        f"{offer.t_id}: продать сейчас за {money(offer.output)} {offer.symbol}?",
+        f"Итог сделки: {money(offer.profit, sign=True)} {offer.symbol}",
         f"Продавец: {offer.provider}",
     ]
     if not offer.costs_known:
@@ -663,6 +664,6 @@ def sell_prompt(offer: ExitQuote) -> str:
 def sold_text(offer: ExitQuote) -> str:
     """Чем кончилась продажа по команде оператора."""
     return (
-        f"{offer.t_id}: продана за {offer.output} {offer.symbol} "
-        f"у {offer.provider}, итог {offer.profit:+} {offer.symbol}"
+        f"{offer.t_id}: продана за {money(offer.output)} {offer.symbol} "
+        f"у {offer.provider}, итог {money(offer.profit, sign=True)} {offer.symbol}"
     )

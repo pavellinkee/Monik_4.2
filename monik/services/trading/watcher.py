@@ -65,7 +65,7 @@ from monik.services.trading.orders import (
     leg_slippage_bps,
 )
 from monik.services.trading.ports import ExecutionCosts, GasCalibrationRecorder, PositionStore
-from monik.services.trading.reporting import OperatorNotifier, closing_text
+from monik.services.trading.reporting import OperatorNotifier, closing_text, money
 from monik.services.trading.sender import SentTransaction, TransactionSender
 
 __all__ = ["LongWaitNotice", "PositionWatcher"]
@@ -90,7 +90,7 @@ class LongWaitNotice:
         """Текст для оператора."""
         hours = self.waited.total_seconds() / 3600
         return (
-            f"{self.position.t_id}: {self.position.input_amount} "
+            f"{self.position.t_id}: {money(self.position.input_amount)} "
             f"{self.position.base_token.symbol} → {self.position.target_token.symbol} "
             f"ждёт выхода {hours:.1f} ч"
         )
