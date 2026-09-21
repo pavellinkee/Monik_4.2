@@ -46,8 +46,12 @@ from monik.domain.enums.resources import RequestPriority, search_priority
 from monik.domain.enums.scheduler import TaskMode
 from monik.infrastructure.db import Database, MigrationRunner
 from monik.infrastructure.providers.contract import AggregatorAdapter
-from monik.services.commands.parser import CommandName, action_callback_data
-from monik.services.notifications import ModeSummary, StartupSummary
+from monik.services.commands.parser import (
+    CommandName,
+    action_callback_data,
+    sell_callback_data,
+)
+from monik.services.notifications import MessageButton, ModeSummary, StartupSummary
 from monik.services.observability import MetricsRegistry
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
@@ -794,10 +798,31 @@ def _positions_task(container: Container) -> TaskHandler:
         for notice in await watcher.tick():
             notifier = container.system_notifier
             if notifier is not None:
-                await notifier.notify_operator(notice.describe())
+                # Кнопка выхода по текущей цене: система сама в убыток
+                # не закрывает, но сообщить о зависшей сделке и не дать
+                # способа её закрыть — половина дела
+                # (``the_main_rules.md``, правила 11 и 22).
+                await notifier.notify_operator(
+                    notice.describe(), buttons=_sell_buttons(notice.position.t_id)
+                )
             await watcher.mark_notified(notice.position)
 
     return run
+
+
+def _sell_buttons(t_id: object) -> tuple[tuple[MessageButton, ...], ...]:
+    """Кнопка «продать по текущей цене» под уведомлением о сделке.
+
+    Номер сделки несёт сама кнопка: уведомлений о затянувшемся ожидании
+    может висеть несколько, и нажатое должно относиться к своему.
+    """
+    return (
+        (
+            MessageButton(
+                label="💸 Продать по текущей цене", callback_data=sell_callback_data(str(t_id))
+            ),
+        ),
+    )
 
 
 def _notification_task(container: Container) -> TaskHandler:

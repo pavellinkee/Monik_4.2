@@ -52,7 +52,12 @@ from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 from monik.services.trading.chain import ChainAccount
 from monik.services.trading.executor import TradeExecutor
-from monik.services.trading.exits import ExitCandidate, projected_output, rank_exits
+from monik.services.trading.exits import (
+    ExitCandidate,
+    ExitQuote,
+    projected_output,
+    rank_exits,
+)
 from monik.services.trading.orders import (
     SignedOrderRunner,
     executes_with_orders,
@@ -352,6 +357,100 @@ class PositionWatcher:
                 net=_money(closed.net_result),
             ),
         )
+
+    async def preview_exit(self, t_id: str) -> ExitQuote | None:
+        """Во что обойдётся выход из сделки прямо сейчас.
+
+        Спрашивает оператор, а не подсистема, поэтому порог выхода здесь
+        не применяется: вопрос не «выгодно ли», а «сколько дадут». Цена
+        берётся лучшая среди всех включённых агрегаторов.
+
+        ``None`` означает «показать нечего»: такой открытой сделки нет,
+        она уже в продаже, или предложения не дал никто.
+        """
+        position = await self._holding(t_id)
+        if position is None:
+            return None
+        best = await self._best_exit(position)
+        return None if best is None else best[0]
+
+    async def sell_at_market(self, t_id: str) -> ExitQuote | None:
+        """Продать сделку по текущей цене по решению оператора.
+
+        Порог выхода не применяется и здесь: правило 11 прямо оставляет
+        этот случай человеку — система сама в убыток не закрывает, но
+        оператор, увидев затянувшееся ожидание, вправе решить иначе.
+
+        Цена спрашивается заново, а не берётся из показанной ранее:
+        между подтверждением и продажей проходят секунды, и решение
+        принимается по свежему обязательству. Возвращается то, по чему
+        сделка действительно ушла.
+        """
+        position = await self._holding(t_id)
+        if position is None:
+            return None
+        best = await self._best_exit(position)
+        if best is None:
+            return None
+        quote, plan, candidate = best
+        _LOGGER.info(
+            "manual exit requested by operator",
+            extra=log_fields(
+                t_id=quote.t_id,
+                provider=quote.provider,
+                output=str(quote.output),
+                profit=str(quote.profit),
+            ),
+        )
+        await self._sell(
+            position.model_copy(
+                update={
+                    "sell_provider_id": candidate.provider_id,
+                    "sell_quoted_gas_units": candidate.quote.estimated_gas_units,
+                }
+            ),
+            plan,
+        )
+        return quote
+
+    async def _holding(self, t_id: str) -> Position | None:
+        """Открытая сделка, ожидающая продажи.
+
+        Только ``HOLDING``: у сделки, уже ушедшей в покупку или продажу,
+        распоряжаться нечем — её ведёт начатая операция.
+        """
+        for position in await self._positions.open_positions():
+            if str(position.t_id) == t_id and position.status is PositionStatus.HOLDING:
+                return position
+        return None
+
+    async def _best_exit(
+        self, position: Position
+    ) -> tuple[ExitQuote, ExecutionPlan, ExitCandidate] | None:
+        """Лучшее предложение выхода без оглядки на порог."""
+        if position.raw_acquired is None:
+            return None
+        adapters = self._exit_adapters(position, immediate=False)
+        if not adapters:
+            return None
+        candidates = await self._quote_exits(position, adapters, needed=None)
+        if not candidates:
+            return None
+        best = candidates[0]
+        plan = await self._build_offer(best.adapter, best.request)
+        costs = await self._exit_costs_raw(position, plan)
+        decimals = position.base_token.decimals
+        quote = ExitQuote(
+            t_id=str(position.t_id),
+            provider=best.provider_id.value,
+            output=Decimal(plan.min_output_raw).scaleb(-decimals),
+            profit=Decimal(
+                position.profit_if_sold_for(plan.min_output_raw, raw_costs=costs or 0)
+            ).scaleb(-decimals),
+            symbol=str(position.base_token.symbol),
+            costs_known=costs is not None,
+        )
+        return quote, plan, best
 
     async def _consider_exit(self, position: Position, *, immediate: bool) -> LongWaitNotice | None:
         """Проверить, выгодно ли продавать сейчас.

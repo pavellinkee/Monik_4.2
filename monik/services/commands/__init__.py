@@ -18,6 +18,7 @@ from monik.services.commands.ports import (
     JobReader,
     NotificationReader,
     OpportunityReader,
+    PositionExitSource,
     ProviderStatus,
     ProviderStatusSource,
     ScannerControl,
@@ -29,6 +30,7 @@ from monik.services.commands.ports import (
 from monik.services.commands.service import OFFSET_KEY, CommandService, OffsetStore, UpdateSource
 
 __all__ = [
+    "PositionExitSource",
     "COMMAND_HELP",
     "OFFSET_KEY",
     "BackupStatus",

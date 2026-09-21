@@ -245,3 +245,71 @@ class TestProjection:
     def test_the_projection_never_falls_to_zero(self) -> None:
         """Нулевой предел отдал бы решателю всё."""
         assert projected_output(1, slippage_bps=9_999) == 1
+
+
+class TestManualExit:
+    """Выход по решению оператора.
+
+    Система сама в убыток не закрывает, но правило 11 прямо оставляет
+    этот случай человеку: увидев затянувшееся ожидание, он вправе
+    решить иначе. Порог выхода к его решению не применяется.
+    """
+
+    async def test_the_price_is_shown_even_when_the_circle_loses(self) -> None:
+        """Вопрос оператора — «сколько дадут», а не «выгодно ли»."""
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, assigned_rate="9.50", better_rate="9.60")
+        position = _position()
+        await positions.create(position)
+
+        offer = await watcher.preview_exit(str(position.t_id))
+
+        assert offer is not None, "цена названа и у убыточного круга"
+        assert offer.provider == ProviderId.VELORA.value, "выбран лучший из включённых"
+        assert offer.profit < 0, "итог честно отрицательный"
+
+    async def test_the_sale_goes_through_at_a_loss(self) -> None:
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, assigned_rate="9.50", better_rate="9.60")
+        position = _position()
+        await positions.create(position)
+
+        sold = await watcher.sell_at_market(str(position.t_id))
+
+        assert sold is not None
+        stored = positions.items[str(position.t_id)]
+        assert stored.status is not PositionStatus.HOLDING, "сделка ушла в продажу"
+        assert stored.sell_provider_id is ProviderId.VELORA, "продавец записан"
+
+    async def test_the_watcher_would_have_waited_on_its_own(self) -> None:
+        """Тот же круг подсистема сама не закрыла бы.
+
+        Проверка нужна, чтобы предыдущая не оказалась случайной: продажа
+        состоялась именно потому, что её велел человек.
+        """
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, assigned_rate="9.50", better_rate="9.60")
+        position = _position()
+        await positions.create(position)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
+    async def test_an_unknown_trade_is_not_invented(self) -> None:
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions)
+        await positions.create(_position())
+
+        assert await watcher.preview_exit("#T999") is None
+        assert await watcher.sell_at_market("#T999") is None
+
+    async def test_a_trade_already_selling_is_left_alone(self) -> None:
+        """У сделки, которую ведёт начатая операция, распоряжаться нечем."""
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions)
+        position = _position(status=PositionStatus.SELLING)
+        await positions.create(position)
+
+        assert await watcher.preview_exit(str(position.t_id)) is None
+        assert await watcher.sell_at_market(str(position.t_id)) is None

@@ -34,11 +34,13 @@ from monik.services.commands.parser import (
     parse_callback,
     parse_command,
     provider_callback_data,
+    sell_confirm_callback_data,
 )
 from monik.services.commands.ports import (
     BackupStatusSource,
     JobReader,
     NotificationReader,
+    PositionExitSource,
     ProviderStatus,
     ProviderStatusSource,
     ScannerControl,
@@ -49,6 +51,7 @@ from monik.services.commands.ports import (
 )
 from monik.services.notifications.ports import MessageButton
 from monik.services.observability.logging import get_logger, log_fields
+from monik.services.trading.exits import ExitQuote
 from monik.services.updates.ports import SystemUpdater
 
 __all__ = ["COMMAND_HELP", "CommandResponse", "CommandRouter"]
@@ -160,6 +163,7 @@ class CommandRouter:
         trading: TradingControl | None = None,
         backups: BackupStatusSource | None = None,
         updater: SystemUpdater | None = None,
+        exits: PositionExitSource | None = None,
         application: str | None = None,
         environment: str | None = None,
     ) -> None:
@@ -173,6 +177,7 @@ class CommandRouter:
         self._trading = trading
         self._backups = backups
         self._updater = updater
+        self._exits = exits
         self._application = application
         self._environment = environment
 
@@ -193,6 +198,8 @@ class CommandRouter:
         запросов не выполняется (``CLAUDE.md`` §35).
         """
         callback = parse_callback(data)
+        if callback.position_id is not None:
+            return await self._sell_response(callback.position_id, confirmed=callback.confirmed)
         if callback.notification_id is not None:
             _, details = await self._notifications.load_texts(callback.notification_id)
             if details is None:
@@ -238,6 +245,42 @@ class CommandRouter:
         return CommandResponse(text="неизвестная команда", handled=False)
 
     # --- управление -------------------------------------------------------
+
+    async def _sell_response(self, t_id: str, *, confirmed: bool) -> CommandResponse:
+        """Продажа зависшей сделки по текущей цене.
+
+        Два шага: сначала показать, по чём продадут, и спросить, потом
+        продать. Одним шагом нельзя — деньги тратятся по нажатию, и
+        промах пальцем не должен стоить сделки.
+
+        Цена перед продажей спрашивается заново: между подтверждением и
+        продажей проходят секунды, и уйти сделка должна по тому, что
+        агрегатор обязуется отдать **сейчас**, а не по показанному.
+        """
+        if self._exits is None:
+            return CommandResponse(text="продажа по команде недоступна", handled=False)
+        if not confirmed:
+            offer = await self._exits.preview_exit(t_id)
+            if offer is None:
+                return CommandResponse(text=f"{t_id}: продать сейчас не у кого", handled=False)
+            return CommandResponse(
+                text=sell_prompt(offer),
+                buttons=(
+                    (
+                        MessageButton(
+                            label="✅ Да", callback_data=sell_confirm_callback_data(t_id)
+                        ),
+                        MessageButton(
+                            label="❌ Нет", callback_data=action_callback_data(CommandName.MENU)
+                        ),
+                    ),
+                ),
+            )
+        sold = await self._exits.sell_at_market(t_id)
+        if sold is None:
+            _LOGGER.warning("manual exit failed", extra=log_fields(t_id=t_id))
+            return CommandResponse(text=f"{t_id}: продать не удалось", handled=False)
+        return CommandResponse(text=sold_text(sold))
 
     def _confirmation_request(self, command: CommandName) -> CommandResponse:
         """Спросить подтверждение перед прерыванием работы."""
@@ -589,3 +632,28 @@ def _details_text(result: ConfirmationResult, job_status: JobStatus) -> str:
     if result.failure_reason:
         lines.append(f"Причина: {result.failure_reason}")
     return "\n".join(lines)
+
+
+def sell_prompt(offer: ExitQuote) -> str:
+    """Вопрос оператору перед продажей по текущей цене.
+
+    Числа — по обязательству агрегатора: человек решает, расставаться ли
+    с деньгами, и видеть он должен то, что ему гарантированно отдадут.
+    """
+    lines = [
+        f"{offer.t_id}: продать сейчас за {offer.output} {offer.symbol}?",
+        f"Итог сделки: {offer.profit:+} {offer.symbol}",
+        f"Продавец: {offer.provider}",
+    ]
+    if not offer.costs_known:
+        # Умолчать нельзя: без газа итог завышен (``CLAUDE.md`` §12).
+        lines.append("Стоимость газа неизвестна — итог показан без неё")
+    return "\n".join(lines)
+
+
+def sold_text(offer: ExitQuote) -> str:
+    """Чем кончилась продажа по команде оператора."""
+    return (
+        f"{offer.t_id}: продана за {offer.output} {offer.symbol} "
+        f"у {offer.provider}, итог {offer.profit:+} {offer.symbol}"
+    )

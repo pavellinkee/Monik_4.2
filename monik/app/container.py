@@ -79,6 +79,7 @@ from monik.services.commands import (
     CommandRouter,
     CommandService,
     ComponentStatus,
+    PositionExitSource,
     ProviderStatus,
     StatsSnapshot,
 )
@@ -557,6 +558,7 @@ def build_container(
         backups=backups,
         updater=updater,
         providers=providers,
+        exits=watcher,
     )
     system_notifier = _build_system_notifier(
         loaded, telegram=telegram, repositories=repositories, clock=clock
@@ -1068,6 +1070,7 @@ def _build_commands(
     backups: BackupService,
     updater: SystemUpdater,
     providers: ProviderRegistry,
+    exits: PositionExitSource | None = None,
 ) -> CommandService | None:
     """Входящий канал команд, если он включён конфигурацией."""
     config = loaded.config.notifications.telegram
@@ -1095,6 +1098,7 @@ def _build_commands(
         trading=trading,
         backups=_BackupStatusSource(backups),
         updater=updater,
+        exits=exits,
         application=version_label(),
         environment=loaded.config.application.environment.value,
     )

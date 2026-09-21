@@ -22,12 +22,39 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal
 
 from monik.domain.enums.providers import ProviderId
 from monik.domain.models.quote import Quote
 from monik.infrastructure.providers.contract import AggregatorAdapter, QuoteRequest
 
-__all__ = ["ExitCandidate", "projected_output", "rank_exits"]
+__all__ = ["ExitCandidate", "ExitQuote", "projected_output", "rank_exits"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExitQuote:
+    """Во что обойдётся выход из сделки прямо сейчас.
+
+    Описание для **оператора**, а не для подсистемы: он спрашивает не
+    «выгодно ли», а «сколько дадут», и порог выхода к этим числам не
+    применяется.
+
+    Числа — по **обязательству** агрегатора, а не по котировке. Человек
+    решает, расставаться ли с деньгами, и видеть он должен то, что ему
+    гарантированно отдадут, а не то, что пообещали.
+    """
+
+    t_id: str
+    provider: str
+    #: Сколько вернётся в базовом токене.
+    output: Decimal
+    #: Итог круга целиком: выручка минус вложенное минус газ.
+    profit: Decimal
+    symbol: str
+    #: Удалось ли посчитать стоимость газа. Когда нет, ``profit``
+    #: посчитан без неё и потому завышен: умолчать об этом нельзя
+    #: (``CLAUDE.md`` §12).
+    costs_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)

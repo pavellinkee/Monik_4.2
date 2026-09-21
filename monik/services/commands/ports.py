@@ -1,8 +1,16 @@
 """Порты обработчиков команд.
 
-Все данные читаются из репозиториев и уже собранных снимков: **ни один
-обработчик не инициирует запрос к провайдеру** (``CLAUDE.md`` §35,
-``15_NOTIFICATION_SYSTEM.md`` §6).
+Данные читаются из репозиториев и уже собранных снимков: обработчик
+показа ничего не спрашивает у провайдеров, и кнопка ``об`` в частности
+не делает нового запроса (``CLAUDE.md`` §35).
+
+Исключение одно и названо явно — :class:`PositionExitSource`. Оператор,
+решающий продать зависшую сделку, спрашивает цену, а цены без запроса
+не существует. Сам обработчик к агрегатору при этом не ходит: он
+обращается к подсистеме исполнения, которой такие запросы принадлежат
+по праву (``the_main_rules.md``, правила 11 и 22). Запрет
+``15_NOTIFICATION_SYSTEM.md`` §6 этим не затронут: он адресован системе
+уведомлений, а не подсистеме исполнения.
 """
 
 from __future__ import annotations
@@ -17,9 +25,11 @@ from monik.domain.models.opportunity import Opportunity
 from monik.domain.models.scan import Scan
 from monik.domain.value_objects.identifiers import KId, OpportunityId
 from monik.services.opportunity.statistics import ConfirmationStatistics
+from monik.services.trading.exits import ExitQuote
 
 __all__ = [
     "BackupStatus",
+    "PositionExitSource",
     "BackupStatusSource",
     "ComponentStatus",
     "JobReader",
@@ -197,6 +207,31 @@ class ScannerControl(Protocol):
 
     def request_restart(self) -> None:
         """Запросить перезапуск процесса."""
+        ...
+
+
+@runtime_checkable
+class PositionExitSource(Protocol):
+    """Выход из открытой сделки по решению оператора.
+
+    Единственный порт команд, за которым стоит обращение к агрегаторам,
+    и единственный, за которым стоит трата денег. Оба свойства
+    намеренные: цены без запроса не существует, а закрыть зависшую
+    сделку по текущей цене — это решение человека, ради которого
+    подсистема исполнения его и уведомляет (``the_main_rules.md``,
+    правила 11 и 22).
+    """
+
+    async def preview_exit(self, t_id: str) -> ExitQuote | None:
+        """Во что обойдётся выход прямо сейчас.
+
+        ``None`` — показывать нечего: такой открытой сделки нет, она уже
+        в продаже, или предложения не дал никто.
+        """
+        ...
+
+    async def sell_at_market(self, t_id: str) -> ExitQuote | None:
+        """Продать по текущей цене. ``None`` — продать не удалось."""
         ...
 
 

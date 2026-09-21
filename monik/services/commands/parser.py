@@ -27,6 +27,8 @@ __all__ = [
     "parse_callback",
     "parse_command",
     "provider_callback_data",
+    "sell_callback_data",
+    "sell_confirm_callback_data",
 ]
 
 #: Префикс callback-данных кнопки ``об``.
@@ -40,6 +42,16 @@ CONFIRM_CALLBACK_PREFIX = "confirm"
 
 #: Префикс кнопки выбора конкретного агрегатора.
 PROVIDER_CALLBACK_PREFIX = "provider"
+
+#: Префикс кнопки «продать по текущей цене». Несёт номер сделки:
+#: уведомлений о затянувшемся ожидании может висеть несколько, и кнопка
+#: обязана относиться к своей.
+SELL_CALLBACK_PREFIX = "sell"
+
+#: Префикс подтверждения этой продажи. Отдельный от общего
+#: ``confirm``: тот подтверждает команду без аргумента, а здесь
+#: подтверждается действие над конкретной сделкой.
+SELL_CONFIRM_CALLBACK_PREFIX = "sellok"
 
 
 class CommandName(StrEnum):
@@ -135,16 +147,32 @@ class ParsedCallback:
     notification_id: str | None = None
     command: ParsedCommand | None = None
     confirmed: bool = False
+    #: Номер сделки, которую оператор хочет продать по текущей цене.
+    position_id: str | None = None
 
     @property
     def is_known(self) -> bool:
         """Распознано ли нажатие."""
-        return self.notification_id is not None or self.command is not None
+        return (
+            self.notification_id is not None
+            or self.command is not None
+            or self.position_id is not None
+        )
 
 
 def details_callback_data(notification_id: str) -> str:
     """Данные кнопки ``об`` для конкретного уведомления."""
     return f"{DETAILS_CALLBACK_PREFIX}:{notification_id}"
+
+
+def sell_callback_data(t_id: str) -> str:
+    """Данные кнопки «продать по текущей цене»."""
+    return f"{SELL_CALLBACK_PREFIX}:{t_id}"
+
+
+def sell_confirm_callback_data(t_id: str) -> str:
+    """Данные кнопки, подтверждающей продажу конкретной сделки."""
+    return f"{SELL_CONFIRM_CALLBACK_PREFIX}:{t_id}"
 
 
 def action_callback_data(command: CommandName) -> str:
@@ -198,6 +226,11 @@ def parse_callback(data: str) -> ParsedCallback:
         return ParsedCallback()
     if prefix == DETAILS_CALLBACK_PREFIX:
         return ParsedCallback(notification_id=payload)
+    if prefix in {SELL_CALLBACK_PREFIX, SELL_CONFIRM_CALLBACK_PREFIX}:
+        return ParsedCallback(
+            position_id=payload,
+            confirmed=prefix == SELL_CONFIRM_CALLBACK_PREFIX,
+        )
     if prefix == PROVIDER_CALLBACK_PREFIX:
         return ParsedCallback(command=ParsedCommand(name=CommandName.PROVIDERS, argument=payload))
     if prefix in {ACTION_CALLBACK_PREFIX, CONFIRM_CALLBACK_PREFIX}:

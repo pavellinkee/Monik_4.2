@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import pytest
 
 from monik.app.control import TradingSwitch
-from monik.app.lifecycle import _budget_allows, _search_allowed
+from monik.app.lifecycle import _budget_allows, _search_allowed, _sell_buttons
 from monik.domain.enums.modes import ScanMode
 
 
@@ -184,3 +184,24 @@ class TestBudgetStopsTheSearch:
         container = _budget_container(room=False, scopes=())
 
         assert await _budget_allows(container, ScanMode.ANN) is True  # type: ignore[arg-type]
+
+
+class TestLongWaitButton:
+    """Под уведомлением о зависшей сделке есть способ её закрыть.
+
+    Сообщить о застрявших деньгах и не дать способа их вернуть —
+    половина дела (``the_main_rules.md``, правило 22).
+    """
+
+    def test_the_notice_carries_a_sell_button(self) -> None:
+        rows = _sell_buttons("#T41")
+
+        labels = [button.label for row in rows for button in row]
+        assert labels == ["💸 Продать по текущей цене"]
+
+    def test_the_button_names_its_own_trade(self) -> None:
+        """Уведомлений может висеть несколько, и каждое ведёт к своему."""
+        assert (
+            _sell_buttons("#T41")[0][0].callback_data != _sell_buttons("#T42")[0][0].callback_data
+        )
+        assert "#T41" in _sell_buttons("#T41")[0][0].callback_data

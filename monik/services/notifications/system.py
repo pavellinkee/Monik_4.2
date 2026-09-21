@@ -170,16 +170,25 @@ class SystemNotifier:
             scanner_stopped_text(reason, detail=detail), subject="scanner_stopped"
         )
 
-    async def notify_operator(self, text: str) -> bool:
+    async def notify_operator(
+        self,
+        text: str,
+        *,
+        buttons: tuple[tuple[MessageButton, ...], ...] = (),
+    ) -> bool:
         """Сообщить оператору о событии подсистемы исполнения.
 
         Отдельный метод, потому что такие сообщения не относятся ни к
         состоянию здоровья, ни к найденной возможности: это просьба
         принять решение о деньгах.
+
+        Какие кнопки предложить, решает вызывающая сторона: система
+        уведомлений о наборе действий не знает и знать не должна
+        (``15_NOTIFICATION_SYSTEM.md`` §6).
         """
         if not self._config.enabled:
             return False
-        return await self._send(f"⏳ {text}", subject="trading")
+        return await self._send(f"⏳ {text}", subject="trading", buttons=buttons)
 
     async def notify_pending_updates(
         self,
