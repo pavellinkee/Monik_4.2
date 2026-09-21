@@ -47,6 +47,7 @@ def _watcher(
     assigned_error: MonikError | None = None,
     min_exit_profit_raw: int = 10_000,
     simulation_ok: bool = True,
+    notify: object | None = None,
 ) -> tuple[PositionWatcher, dict[ProviderId, FakeAdapter]]:
     """Наблюдатель с двумя включёнными агрегаторами."""
     clock = FakeClock(f.NOW)
@@ -95,6 +96,7 @@ def _watcher(
         exit_requires_profit=True,
         long_wait_enabled=False,
         long_wait_seconds=7_200,
+        notify=notify,  # type: ignore[arg-type]
         receipt_timeout_seconds=1,
         receipt_poll_seconds=1,
     )
@@ -371,3 +373,85 @@ class TestFailedSaleIsNotReportedAsSuccess:
 
         assert adapters[ProviderId.UNISWAP].quote_calls, "назначенного спросили"
         assert adapters[ProviderId.VELORA].quote_calls, "второго тоже"
+
+
+class _Notifier:
+    """Канал оператора, запоминающий отправленное."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.sent: list[str] = []
+        self._fails = fails
+
+    async def notify_operator(self, text: str) -> bool:
+        if self._fails:
+            raise RuntimeError("канал недоступен")
+        self.sent.append(text)
+        return True
+
+
+class TestClosingIsAnnounced:
+    """Об итоге завершённой сделки оператор узнаёт сразу.
+
+    21.09 продажа `#T41` состоялась, а ответ на нажатие кнопки пропал
+    вместе с упавшим обработчиком команды: оператор остался без вести о
+    собственных деньгах. Сообщение об итоге от команды не зависит.
+    """
+
+    async def test_a_closed_trade_is_announced(self) -> None:
+        notifier = _Notifier()
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, notify=notifier)
+        position = _position()
+        await positions.create(position)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.CLOSED
+        assert len(notifier.sent) == 1
+        assert str(position.t_id) in notifier.sent[0]
+        assert "Итог:" in notifier.sent[0]
+
+    async def test_a_manual_sale_is_announced_too(self) -> None:
+        """Приказ оператора — не повод молчать об исходе."""
+        notifier = _Notifier()
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, notify=notifier, assigned_rate="9.50", better_rate="9.60")
+        position = _position()
+        await positions.create(position)
+
+        await watcher.sell_at_market(str(position.t_id))
+
+        assert len(notifier.sent) == 1
+        assert "Итог:" in notifier.sent[0]
+
+    async def test_a_waiting_trade_is_not_announced(self) -> None:
+        """Пока сделка не закрыта, объявлять нечего."""
+        notifier = _Notifier()
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, notify=notifier, assigned_rate="9.50", better_rate="9.60")
+        await positions.create(_position())
+
+        await watcher.tick()
+
+        assert notifier.sent == []
+
+    async def test_an_undelivered_notice_does_not_break_the_trade(self) -> None:
+        """Уведомление — рассказ о результате, а не его часть."""
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, notify=_Notifier(fails=True))
+        position = _position()
+        await positions.create(position)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.CLOSED
+
+    async def test_without_a_channel_the_trade_still_closes(self) -> None:
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions)
+        position = _position()
+        await positions.create(position)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.CLOSED

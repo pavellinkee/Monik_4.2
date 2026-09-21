@@ -25,7 +25,7 @@ from monik.domain.value_objects.timestamps import UtcDatetime
 from monik.services.observability.clock import Clock
 from monik.services.observability.logging import get_logger, log_fields
 
-__all__ = ["OperatorNotifier", "TradeReporter", "report_text"]
+__all__ = ["OperatorNotifier", "TradeReporter", "closing_text", "report_text"]
 
 _LOGGER = get_logger("services.trading.reporting")
 
@@ -76,6 +76,41 @@ def _local(moment: UtcDatetime, timezone: tzinfo | None) -> str:
     правило 7).
     """
     return (moment if timezone is None else moment.astimezone(timezone)).strftime("%H:%M")
+
+
+def closing_text(position: Position) -> str:
+    """Итог завершённой сделки для оператора.
+
+    Отдельное сообщение, а не строка получасового отчёта: сделка может
+    закрыться через час после того, как оператор о ней спрашивал, и
+    узнавать об этом из сводки — значит узнавать поздно. Особенно когда
+    закрытие он сам и приказал.
+
+    Числа берутся у самой сделки, а не пересчитываются здесь: итог уже
+    посчитан по факту — по приросту остатка и по квитанции, — и второй
+    расчёт мог бы с ним разойтись.
+    """
+    symbol = position.base_token.symbol
+    decimals = position.base_token.decimals
+    net = position.net_result
+    lines = [
+        f"{'✅' if net is not None and net >= 0 else '🔻'} {position.t_id} завершена: "
+        f"{symbol} → {position.target_token.symbol} → {symbol}",
+        f"Вложено: {position.input_amount:f} {symbol}",
+    ]
+    returned = position.raw_returned
+    if returned is not None:
+        lines.append(f"Вернулось: {Decimal(returned).scaleb(-decimals):f} {symbol}")
+    if position.raw_gas_cost is not None:
+        lines.append(f"Газ: {Decimal(position.raw_gas_cost).scaleb(-decimals):f} {symbol}")
+    # Неизвестный итог не превращается в ноль: он бы тихо улучшил
+    # картину (``CLAUDE.md`` §12).
+    lines.append("Итог: неизвестен" if net is None else f"Итог: {net:+f} {symbol}")
+    lines.append(f"Круг: {position.buy_provider_id.value} → {position.sell_provider_id.value}")
+    if position.closed_at is not None:
+        hours = (position.closed_at - position.opened_at).total_seconds() / 3600
+        lines.append(f"Длилась: {hours:.1f} ч")
+    return "\n".join(lines)
 
 
 def report_text(

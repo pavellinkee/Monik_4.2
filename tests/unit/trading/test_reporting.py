@@ -19,7 +19,7 @@ from monik.domain.models.position import Position
 from monik.domain.models.scan import ScanSummary
 from monik.domain.value_objects.identifiers import TId
 from monik.services.observability import FakeClock
-from monik.services.trading.reporting import TradeReporter, report_text
+from monik.services.trading.reporting import TradeReporter, closing_text, report_text
 from tests import factories as f
 
 SINCE = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -362,3 +362,57 @@ class TestOperatorTimezone:
 
         assert await reporter.tick() is True
         assert "21:00–21:30" in notifier.sent[0], "12:00 UTC — это 21:00 в Токио"
+
+
+class TestClosingNotice:
+    """Итог завершённой сделки приходит отдельным сообщением.
+
+    Сделка может закрыться через час после того, как оператор о ней
+    спрашивал, и узнавать об этом из получасовой сводки — значит
+    узнавать поздно. 21.09 продажа `#T41` состоялась, а ответ на нажатие
+    кнопки пропал вместе с упавшим обработчиком команды.
+    """
+
+    def test_the_result_is_named(self) -> None:
+        text = closing_text(
+            _position(raw_input=100_000_000, raw_returned=100_016_907, raw_gas_cost=16_375)
+        )
+
+        assert "#T16" in text
+        assert "Вложено: 100.000000" in text
+        assert "Вернулось: 100.016907" in text
+        assert "Газ: 0.016375" in text
+        assert "Итог: +0.000532" in text
+
+    def test_a_profitable_trade_is_marked_as_such(self) -> None:
+        text = closing_text(
+            _position(raw_input=100_000_000, raw_returned=100_016_907, raw_gas_cost=16_375)
+        )
+
+        assert text.startswith("✅")
+
+    def test_a_losing_trade_is_not_dressed_up(self) -> None:
+        """Убыток обозначается честно: оператор решает по нему."""
+        text = closing_text(
+            _position(raw_input=100_000_000, raw_returned=99_900_000, raw_gas_cost=16_375)
+        )
+
+        assert text.startswith("🔻")
+        assert "Итог: -0.116375" in text
+
+    def test_an_unknown_result_is_not_a_zero(self) -> None:
+        """Неизвестный итог нулём не считается (``CLAUDE.md`` §12)."""
+        text = closing_text(
+            _position(raw_input=100_000_000, raw_returned=100_016_907, raw_gas_cost=None)
+        )
+
+        assert "Итог: неизвестен" in text
+        assert "+0.000000" not in text
+
+    def test_the_route_and_duration_are_shown(self) -> None:
+        text = closing_text(
+            _position(raw_input=100_000_000, raw_returned=100_016_907, raw_gas_cost=16_375)
+        )
+
+        assert "Круг: cow → uniswap" in text
+        assert "Длилась:" in text

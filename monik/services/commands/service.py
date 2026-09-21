@@ -114,8 +114,7 @@ class CommandService:
         try:
             if update.is_callback and update.callback_data is not None:
                 response = await self.router.handle_callback(update.callback_data)
-                if update.callback_query_id is not None:
-                    await self.updates.answer_callback(update.callback_query_id)
+                await self._acknowledge(update)
             elif update.is_command and update.text is not None:
                 response = await self.router.handle_text(update.text)
             else:
@@ -132,6 +131,29 @@ class CommandService:
 
         await self._reply(response)
         return response
+
+    async def _acknowledge(self, update: TelegramUpdate) -> None:
+        """Погасить «часики» на нажатой кнопке.
+
+        Отдельно от обработки и с собственной защитой: Telegram отвергает
+        подтверждение устаревшего нажатия, а действие к этому моменту уже
+        выполнено. 21.09 продажа `#T41` состоялась, подтверждение не
+        прошло, и вместе с ним пропал ответ оператору — о собственных
+        деньгах он не узнал. Неудача здесь стоит невыключенных «часиков»,
+        и большего стоить не должна.
+        """
+        if update.callback_query_id is None:
+            return
+        try:
+            await self.updates.answer_callback(update.callback_query_id)
+        except MonikError as error:
+            _LOGGER.info(
+                "callback acknowledgement was refused",
+                extra=log_fields(
+                    update_id=update.update_id,
+                    error_category=error.info.category.value,
+                ),
+            )
 
     def _is_allowed(self, update: TelegramUpdate) -> bool:
         """Источник команды обязан быть разрешён конфигурацией.

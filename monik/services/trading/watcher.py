@@ -65,6 +65,7 @@ from monik.services.trading.orders import (
     leg_slippage_bps,
 )
 from monik.services.trading.ports import ExecutionCosts, GasCalibrationRecorder, PositionStore
+from monik.services.trading.reporting import OperatorNotifier, closing_text
 from monik.services.trading.sender import SentTransaction, TransactionSender
 
 __all__ = ["LongWaitNotice", "PositionWatcher"]
@@ -117,6 +118,7 @@ class PositionWatcher:
         exit_requires_profit: bool = True,
         order_slippage_bps: int = 0,
         orders: SignedOrderRunner | None = None,
+        notify: OperatorNotifier | None = None,
         receipt_timeout_seconds: int = 120,
         receipt_poll_seconds: int = 2,
     ) -> None:
@@ -139,6 +141,9 @@ class PositionWatcher:
         #: Допуск ноги, исполняемой намерением: у неё промах бесплатен.
         self._order_slippage_bps = order_slippage_bps
         self._orders = orders
+        #: Кому сообщить об итоге завершённой сделки. Необязателен:
+        #: подсистема исполнения работает и без канала уведомлений.
+        self._notify = notify
         self._receipt_timeout = timedelta(seconds=receipt_timeout_seconds)
         self._receipt_poll = timedelta(seconds=receipt_poll_seconds)
 
@@ -307,19 +312,19 @@ class PositionWatcher:
                 "trade closed with an unknown result: the balance before the sale was not recorded",
                 extra=log_fields(t_id=str(position.t_id), tx=position.sell_tx_hash or ""),
             )
-            await self._positions.update(
-                position.model_copy(
-                    update={
-                        "status": PositionStatus.CLOSED,
-                        "raw_returned": position.raw_input,
-                        "raw_gas_cost": None,
-                        "sell_gas_wei": spent_on_selling,
-                        "sell_gas_units": sold_units,
-                        "updated_at": now,
-                        "closed_at": now,
-                    }
-                )
+            unknown = position.model_copy(
+                update={
+                    "status": PositionStatus.CLOSED,
+                    "raw_returned": position.raw_input,
+                    "raw_gas_cost": None,
+                    "sell_gas_wei": spent_on_selling,
+                    "sell_gas_units": sold_units,
+                    "updated_at": now,
+                    "closed_at": now,
+                }
             )
+            await self._positions.update(unknown)
+            await self._announce_closed(unknown)
             return
         after = await self._account.token_balance(position.base_token, priority=_PRIORITY)
         # Выручка — это прирост остатка, а не сам остаток: на счёте лежат
@@ -357,6 +362,7 @@ class PositionWatcher:
                 net=_money(closed.net_result),
             ),
         )
+        await self._announce_closed(closed)
 
     async def preview_exit(self, t_id: str) -> ExitQuote | None:
         """Во что обойдётся выход из сделки прямо сейчас.
@@ -762,6 +768,32 @@ class PositionWatcher:
         return await self._costs.to_base_raw(
             position.network_id, position.base_token, wei=total_wei
         )
+
+    async def _announce_closed(self, position: Position) -> None:
+        """Сообщить оператору, чем кончилась сделка.
+
+        Сообщение отдельное и не зависит от того, чем закрытие вызвано:
+        такт наблюдателя, проверка после покупки или прямой приказ
+        оператора. 21.09 продажа `#T41` состоялась, а ответ на нажатие
+        кнопки пропал вместе с упавшим обработчиком команды, и оператор
+        остался без вести о собственных деньгах.
+
+        Недоставка сообщения сделку не трогает: уведомление — рассказ о
+        результате, а не его часть (``CLAUDE.md`` §35).
+        """
+        if self._notify is None:
+            return
+        try:
+            await self._notify.notify_operator(closing_text(position))
+        except Exception as error:  # noqa: BLE001 - доставка не должна ронять торговлю
+            _LOGGER.warning(
+                "closing notice was not delivered",
+                extra=log_fields(
+                    t_id=str(position.t_id),
+                    error=type(error).__name__,
+                    detail=str(error),
+                ),
+            )
 
     async def _record_calibration(self, position: Position, actual_units: int) -> None:
         """Передать замер расхода газа продажи.

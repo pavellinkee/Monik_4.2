@@ -419,6 +419,12 @@ def build_container(
     )
 
     telegram = _build_telegram(loaded, http_client=http_client, resources=resources, clock=clock)
+    # Канал уведомлений оператора собирается до наблюдателя: тот
+    # рассказывает об итоге завершённой сделки сразу, а не ждёт
+    # получасового отчёта.
+    system_notifier = _build_system_notifier(
+        loaded, telegram=telegram, repositories=repositories, clock=clock
+    )
     notifications = NotificationDispatcher(
         config.notifications,
         store=repositories.notifications,
@@ -544,6 +550,7 @@ def build_container(
             long_wait_seconds=config.trading.max_wait_notice_seconds,
             exit_requires_profit=config.trading.exit_requires_profit,
             order_slippage_bps=int(config.trading.order_slippage_percent * 100),
+            notify=system_notifier,
             orders=order_runner,
             receipt_timeout_seconds=config.trading.receipt_timeout_seconds,
             receipt_poll_seconds=config.trading.receipt_poll_seconds,
@@ -567,9 +574,6 @@ def build_container(
         updater=updater,
         providers=providers,
         exits=watcher,
-    )
-    system_notifier = _build_system_notifier(
-        loaded, telegram=telegram, repositories=repositories, clock=clock
     )
     reporter = _build_reporter(
         config,
