@@ -53,6 +53,7 @@ from monik.infrastructure.providers.contract import (
     AdapterHealth,
     QuoteRequest,
     RouteValidation,
+    TypedDataSigner,
 )
 from monik.infrastructure.providers.http_adapter import HttpProviderAdapter
 from monik.infrastructure.providers.normalization import (
@@ -145,6 +146,7 @@ class VeloraDeltaAdapter(HttpProviderAdapter):
         clock: Any,
         api_key: SecretValue | None = None,
         base_url: str | None = None,
+        signer: TypedDataSigner | None = None,
     ) -> None:
         super().__init__(
             _PROVIDER,
@@ -154,6 +156,7 @@ class VeloraDeltaAdapter(HttpProviderAdapter):
             clock=clock,
             api_key=api_key,
             base_url=base_url or config.base_url or endpoints.DEFAULT_BASE_URL,
+            signer=signer,
         )
         self._capabilities = AdapterCapabilities(
             provider_id=_PROVIDER,

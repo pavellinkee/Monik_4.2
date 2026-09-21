@@ -18,6 +18,7 @@ Monik остаётся потребителем котировок: адапте
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -53,6 +54,7 @@ from monik.infrastructure.providers.contract import (
     AdapterHealth,
     QuoteRequest,
     RouteValidation,
+    TypedDataSigner,
 )
 from monik.infrastructure.providers.http_adapter import HttpProviderAdapter
 from monik.infrastructure.providers.normalization import (
@@ -132,6 +134,7 @@ class UniswapAdapter(HttpProviderAdapter):
         clock: Clock,
         api_key: SecretValue | None = None,
         base_url: str | None = None,
+        signer: TypedDataSigner | None = None,
     ) -> None:
         super().__init__(
             _PROVIDER,
@@ -141,6 +144,7 @@ class UniswapAdapter(HttpProviderAdapter):
             clock=clock,
             api_key=api_key,
             base_url=base_url or config.base_url or endpoints.DEFAULT_BASE_URL,
+            signer=signer,
         )
         self._capabilities = AdapterCapabilities(
             provider_id=_PROVIDER,
@@ -216,10 +220,7 @@ class UniswapAdapter(HttpProviderAdapter):
             operation=self._capability_operation(request),
             request_id=RequestId.generate(),
             method="POST",
-            # Передаётся ровно то, что вернула котировка: подпись разрешения
-            # не прикладывается, потому что разрешение выдаётся отдельной
-            # транзакцией и живёт на счёте, а не внутри обмена.
-            json_body={"quote": quote_object},
+            json_body=self._swap_body(quote_payload, quote_object),
             priority=request.priority,
             correlation_id=request.correlation_id,
             timeout=request.timeout,
@@ -227,6 +228,44 @@ class UniswapAdapter(HttpProviderAdapter):
         )
         with normalized_response(_PROVIDER):
             return self._to_swap(request, quote, quote_object, swap_payload, chain_id)
+
+    def _swap_body(self, quote_payload: Any, quote_object: Any) -> dict[str, Any]:
+        """Тело запроса сборки обмена.
+
+        Котировка передаётся целиком — её объект второй шаг принимает
+        как есть. Вместе с ней уходит **подписанное разрешение**, если
+        API его запросило.
+
+        Permit2 привязывает разрешение к адресу роутера, а роутер
+        Uniswap меняет: выданное прежнему к новому не относится, и обмен
+        откатывается с ``AllowanceExpired(0)``. Именно так 21.09 не
+        продалась `#T41`. Разрешение, подписанное вместе с обменом, к
+        адресу заранее не привязано и смену роутера переживает.
+        """
+        permit = quote_payload.get("permitData") if isinstance(quote_payload, Mapping) else None
+        if permit is None:
+            # Разрешение уже есть на счёте — API его не просит.
+            return {"quote": quote_object}
+        if self._signer is None:
+            raise DataError(
+                "uniswap swap requires a Permit2 signature but no signer is configured",
+                code="permit_signer_missing",
+                provider_code=_PROVIDER.value,
+            )
+        return {
+            "quote": quote_object,
+            "permitData": permit,
+            "signature": self._signer.sign_typed_data(
+                {
+                    "domain": require_field(permit, "domain", provider=_PROVIDER),
+                    "types": require_field(permit, "types", provider=_PROVIDER),
+                    "primaryType": _permit_primary_type(
+                        require_field(permit, "types", provider=_PROVIDER)
+                    ),
+                    "message": require_field(permit, "values", provider=_PROVIDER),
+                }
+            ),
+        }
 
     def _to_swap(
         self,
@@ -734,3 +773,41 @@ def _parse_value(raw: Any) -> int:
             code="provider_response_malformed",
             provider_code=_PROVIDER.value,
         ) from error
+
+
+def _permit_primary_type(types: Any) -> str:
+    """Главный тип набора EIP-712.
+
+    Ответ его не называет, а подпись без него собрать нельзя. Он
+    выводится из самих данных: главный — тот, на который не ссылается ни
+    одно поле остальных. Перебирать имена руками нельзя, иначе смена
+    формы разрешения у провайдера тихо сломала бы подпись.
+    """
+    if not isinstance(types, Mapping):
+        raise DataError(
+            "uniswap permit types are not an object",
+            code="permit_types_invalid",
+            provider_code=_PROVIDER.value,
+        )
+    referenced: set[str] = set()
+    for fields in types.values():
+        if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
+            continue
+        for field_definition in fields:
+            if not isinstance(field_definition, Mapping):
+                continue
+            declared = field_definition.get("type")
+            if isinstance(declared, str):
+                referenced.add(declared.split("[", 1)[0])
+    candidates = [
+        name
+        for name in types
+        if isinstance(name, str) and name != "EIP712Domain" and name not in referenced
+    ]
+    if len(candidates) != 1:
+        raise DataError(
+            f"uniswap permit has no single primary type: {sorted(types)}",
+            code="permit_primary_type_unknown",
+            provider_code=_PROVIDER.value,
+        )
+    return candidates[0]

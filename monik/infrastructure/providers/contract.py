@@ -12,9 +12,10 @@ Adapter не принимает бизнес-решений (``06_AGGREGATOR_ADA
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from monik.domain.enums.health import AdapterState
 from monik.domain.enums.operations import (
@@ -45,7 +46,23 @@ __all__ = [
     "AggregatorAdapter",
     "QuoteRequest",
     "RouteValidation",
+    "TypedDataSigner",
 ]
+
+
+@runtime_checkable
+class TypedDataSigner(Protocol):
+    """Подпись типизованных данных EIP-712.
+
+    Нужна адаптеру, чей API требует подписи **до** того, как отдаст
+    транзакцию: разрешение Permit2 у Uniswap подписывается вместе с
+    обменом и на счёте заранее не живёт. Ключ за этим портом и остаётся:
+    адаптер отдаёт данные и получает подпись, не видя секрета.
+    """
+
+    def sign_typed_data(self, typed_data: Mapping[str, Any]) -> str:
+        """Подписать и вернуть подпись в виде ``0x``-строки."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

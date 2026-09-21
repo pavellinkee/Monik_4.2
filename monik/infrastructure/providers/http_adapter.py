@@ -39,7 +39,7 @@ from monik.domain.models.resource import ResourceKey, ResourceRequest
 from monik.domain.value_objects.identifiers import CorrelationId, RequestId
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.http import HttpClient, HttpRequest, HttpResponse, classify_response
-from monik.infrastructure.providers.contract import QuoteRequest
+from monik.infrastructure.providers.contract import QuoteRequest, TypedDataSigner
 from monik.services.observability.clock import Clock
 from monik.services.observability.redaction import REDACTED, redact_text
 from monik.services.resources import ResourceManager
@@ -65,6 +65,7 @@ class HttpProviderAdapter:
         clock: Clock,
         api_key: SecretValue | None = None,
         base_url: str,
+        signer: TypedDataSigner | None = None,
     ) -> None:
         self._provider_id = provider_id
         self._config = config
@@ -73,6 +74,10 @@ class HttpProviderAdapter:
         self._clock = clock
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        #: Чем подписывать типизованные данные, если API провайдера
+        #: этого требует. Нужно не всем, поэтому необязателен; ключ
+        #: остаётся за портом и в адаптер не попадает.
+        self._signer = signer
 
     @property
     def provider_id(self) -> ProviderId:

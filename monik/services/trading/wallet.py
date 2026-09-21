@@ -83,37 +83,56 @@ class TradingWallet:
         message = prepared.get("message")
         types = prepared.get("types")
         primary = prepared.get("primaryType")
-        if isinstance(message, Mapping) and isinstance(types, Mapping):
-            fields = types.get(primary) if isinstance(primary, str) else None
-            prepared["message"] = self._coerce_numbers(message, fields)
+        if isinstance(message, Mapping) and isinstance(types, Mapping) and isinstance(primary, str):
+            prepared["message"] = self._coerce(message, primary, types)
         signed = self._account.sign_message(encode_typed_data(full_message=prepared))
         return "0x" + bytes(signed.signature).hex()
 
-    @staticmethod
-    def _coerce_numbers(message: Mapping[str, Any], fields: Any) -> dict[str, Any]:
-        """Привести значения целочисленных полей к ``int``."""
-        if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
-            return dict(message)
-        numeric = {
-            field["name"]
-            for field in fields
-            if isinstance(field, Mapping)
-            and isinstance(field.get("type"), str)
-            and field["type"].startswith(("uint", "int"))
-            and isinstance(field.get("name"), str)
-        }
-        prepared = dict(message)
-        for name in numeric:
-            value = prepared.get(name)
-            if isinstance(value, str):
-                try:
-                    prepared[name] = int(value)
-                except ValueError:
-                    raise ConfigurationError(
-                        f"typed data field {name!r} is declared numeric but is not a number",
-                        code="typed_data_field_invalid",
-                    ) from None
-        return prepared
+    @classmethod
+    def _coerce(cls, value: Any, type_name: str, types: Mapping[str, Any]) -> Any:
+        """Привести значение к объявленному типу EIP-712.
+
+        Обход рекурсивный, потому что структура бывает вложенной:
+        ``PermitSingle`` Permit2 держит числа внутри ``PermitDetails``,
+        и плоское приведение до них не добиралось.
+
+        Замер 21.09 показал, что ``eth_account`` числовые строки
+        принимает и сам, то есть подпись вложенной структуры выходила
+        верной и без этого. Приведение всё же доведено до конца
+        сознательно: оно делает поведение явным вместо того, чтобы
+        зависеть от необъявленной любезности библиотеки. Ровно по этой
+        причине приведение здесь и появилось изначально.
+
+        Тип берётся из самих данных, а не из списка имён: иначе каждое
+        новое поле пришлось бы дописывать руками.
+        """
+        if type_name.endswith("]"):
+            inner = type_name[: type_name.rindex("[")]
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                return [cls._coerce(item, inner, types) for item in value]
+            return value
+        fields = types.get(type_name)
+        if isinstance(fields, Sequence) and not isinstance(fields, (str, bytes)):
+            if not isinstance(value, Mapping):
+                return value
+            prepared = dict(value)
+            for field in fields:
+                if not isinstance(field, Mapping):
+                    continue
+                name = field.get("name")
+                declared = field.get("type")
+                if isinstance(name, str) and isinstance(declared, str) and name in prepared:
+                    prepared[name] = cls._coerce(prepared[name], declared, types)
+            return prepared
+        if type_name.startswith(("uint", "int")) and isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                raise ConfigurationError(
+                    f"typed data field of type {type_name!r} is not a number: {value!r}",
+                    code="typed_data_field_invalid",
+                ) from None
+        return value
 
     def __repr__(self) -> str:
         """Представление без секрета: только адрес."""

@@ -37,7 +37,7 @@ from monik.domain.models.resource import ResourceKey
 from monik.domain.value_objects.identity import NetworkId
 from monik.infrastructure.db import Database
 from monik.infrastructure.http import HttpClient, HttpxClient, UrlPolicy
-from monik.infrastructure.providers.contract import AggregatorAdapter
+from monik.infrastructure.providers.contract import AggregatorAdapter, TypedDataSigner
 from monik.infrastructure.providers.cow import CowAdapter
 from monik.infrastructure.providers.cow import endpoints as cow_endpoints
 from monik.infrastructure.providers.health_tracking import HealthTrackingAdapter
@@ -296,10 +296,19 @@ def build_container(
 
     resources = ResourceManager(config.resources, clock)
     _register_provider_limits(config, resources)
+    # Торговый счёт собирается до адаптеров: его подпись нужна тому из
+    # них, чей API требует подписанного разрешения ещё до сборки обмена.
+    wallet = _build_wallet(loaded)
     built_adapters = (
         dict(adapters)
         if adapters is not None
-        else _build_adapters(loaded, http_client=http_client, resources=resources, clock=clock)
+        else _build_adapters(
+            loaded,
+            http_client=http_client,
+            resources=resources,
+            clock=clock,
+            signer=wallet,
+        )
     )
     # Исход каждого обращения фиксируется Health Monitoring: без этого
     # состояние провайдера навсегда осталось бы ``UNKNOWN``
@@ -437,7 +446,6 @@ def build_container(
         tokens=tokens,
         networks=networks,
     )
-    wallet = _build_wallet(loaded)
     chain_account = (
         ChainAccount(
             address=wallet.address,
@@ -679,6 +687,7 @@ def _build_adapters(
     http_client: HttpClientFactory,
     resources: ResourceManager,
     clock: Clock,
+    signer: TypedDataSigner | None = None,
 ) -> dict[ProviderId, AggregatorAdapter]:
     """Адаптеры включённых провайдеров.
 
@@ -698,6 +707,10 @@ def _build_adapters(
             resources=resources,
             clock=clock,
             api_key=_provider_secret(loaded, provider),
+            # Подписант передаётся всем одинаково: нужен он не каждому,
+            # но выбирать получателя по идентификатору провайдера ядру
+            # нельзя (``CLAUDE.md`` §7). Кому не нужен — тот не смотрит.
+            signer=signer,
         )
     return adapters
 
