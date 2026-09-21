@@ -278,8 +278,17 @@ class CommandRouter:
             )
         sold = await self._exits.sell_at_market(t_id)
         if sold is None:
+            # Сообщить об успехе выхода, которого не было, хуже, чем
+            # сообщить о неудаче: оператор ушёл бы, считая деньги
+            # свободными.
             _LOGGER.warning("manual exit failed", extra=log_fields(t_id=t_id))
-            return CommandResponse(text=f"{t_id}: продать не удалось", handled=False)
+            return CommandResponse(
+                text=(
+                    f"{t_id}: продать не удалось — предложение не исполнилось.\n"
+                    "Сделка осталась в ожидании, причина в журнале."
+                ),
+                handled=False,
+            )
         return CommandResponse(text=sold_text(sold))
 
     def _confirmation_request(self, command: CommandName) -> CommandResponse:

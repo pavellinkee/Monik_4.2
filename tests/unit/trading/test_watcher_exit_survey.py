@@ -46,10 +46,11 @@ def _watcher(
     better_rate: str = BETTER_RATE,
     assigned_error: MonikError | None = None,
     min_exit_profit_raw: int = 10_000,
+    simulation_ok: bool = True,
 ) -> tuple[PositionWatcher, dict[ProviderId, FakeAdapter]]:
     """Наблюдатель с двумя включёнными агрегаторами."""
     clock = FakeClock(f.NOW)
-    node = ScriptedNode()
+    node = ScriptedNode(simulation_ok=simulation_ok)
     costs = FixedCosts(COSTS_RAW)
     wallet = TradingWallet(SecretValue("K", str(Account.create().key.hex())))
     assigned = FakeAdapter(
@@ -313,3 +314,60 @@ class TestManualExit:
 
         assert await watcher.preview_exit(str(position.t_id)) is None
         assert await watcher.sell_at_market(str(position.t_id)) is None
+
+
+class TestFailedSaleIsNotReportedAsSuccess:
+    """Продажа, которая не пошла, не должна выглядеть состоявшейся.
+
+    21.09 оператор нажал «продать по текущей цене» у `#T41`, получил
+    «продана» и увидел сделку на месте: транзакция откатывалась бы на
+    симуляции, а продажа возвращала успех независимо от исхода.
+    """
+
+    async def test_a_reverting_swap_is_reported_as_failure(self) -> None:
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, simulation_ok=False)
+        position = _position()
+        await positions.create(position)
+
+        sold = await watcher.sell_at_market(str(position.t_id))
+
+        assert sold is None, "об успехе не сообщено"
+
+    async def test_a_reverting_swap_leaves_the_trade_waiting(self) -> None:
+        """Сделка остаётся там, где была, и это видно по состоянию."""
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, simulation_ok=False)
+        position = _position()
+        await positions.create(position)
+
+        await watcher.sell_at_market(str(position.t_id))
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
+    async def test_the_watcher_keeps_waiting_too(self) -> None:
+        """Тот же отказ на обычном такте сделку не теряет."""
+        positions = MemoryPositions()
+        watcher, _ = _watcher(positions, simulation_ok=False)
+        position = _position()
+        await positions.create(position)
+
+        await watcher.tick()
+
+        assert positions.items[str(position.t_id)].status is PositionStatus.HOLDING
+
+    async def test_every_provider_is_tried_before_giving_up(self) -> None:
+        """Отказ лидера не отменяет остальных.
+
+        Предложение могло не исполниться у одного и исполниться у
+        другого: сдаваться на первом значит бросать деньги в позиции.
+        """
+        positions = MemoryPositions()
+        watcher, adapters = _watcher(positions, simulation_ok=False)
+        position = _position()
+        await positions.create(position)
+
+        await watcher.sell_at_market(str(position.t_id))
+
+        assert adapters[ProviderId.UNISWAP].quote_calls, "назначенного спросили"
+        assert adapters[ProviderId.VELORA].quote_calls, "второго тоже"

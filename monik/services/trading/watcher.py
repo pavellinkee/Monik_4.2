@@ -371,47 +371,62 @@ class PositionWatcher:
         position = await self._holding(t_id)
         if position is None:
             return None
-        best = await self._best_exit(position)
-        return None if best is None else best[0]
+        for candidate in await self._exit_candidates(position):
+            described = await self._describe_exit(position, candidate)
+            if described is not None:
+                return described[0]
+        return None
 
     async def sell_at_market(self, t_id: str) -> ExitQuote | None:
         """Продать сделку по текущей цене по решению оператора.
 
-        Порог выхода не применяется и здесь: правило 11 прямо оставляет
-        этот случай человеку — система сама в убыток не закрывает, но
+        Порог выхода не применяется: правило 11 прямо оставляет этот
+        случай человеку — система сама в убыток не закрывает, но
         оператор, увидев затянувшееся ожидание, вправе решить иначе.
 
         Цена спрашивается заново, а не берётся из показанной ранее:
         между подтверждением и продажей проходят секунды, и решение
-        принимается по свежему обязательству. Возвращается то, по чему
-        сделка действительно ушла.
+        принимается по свежему обязательству.
+
+        Если предложение лидера не исполнилось — транзакция откатилась
+        бы, книга не приняла заявку, — берётся следующий по выгоде.
+        Возвращается то, по чему сделка **действительно** ушла, и
+        ``None``, если не ушла ни у кого: сообщить об успехе выхода,
+        которого не было, хуже, чем сообщить о неудаче.
         """
         position = await self._holding(t_id)
         if position is None:
             return None
-        best = await self._best_exit(position)
-        if best is None:
-            return None
-        quote, plan, candidate = best
-        _LOGGER.info(
-            "manual exit requested by operator",
-            extra=log_fields(
-                t_id=quote.t_id,
-                provider=quote.provider,
-                output=str(quote.output),
-                profit=str(quote.profit),
-            ),
-        )
-        await self._sell(
-            position.model_copy(
-                update={
-                    "sell_provider_id": candidate.provider_id,
-                    "sell_quoted_gas_units": candidate.quote.estimated_gas_units,
-                }
-            ),
-            plan,
-        )
-        return quote
+        for candidate in await self._exit_candidates(position):
+            described = await self._describe_exit(position, candidate)
+            if described is None:
+                continue
+            quote, plan = described
+            _LOGGER.info(
+                "manual exit requested by operator",
+                extra=log_fields(
+                    t_id=quote.t_id,
+                    provider=quote.provider,
+                    output=str(quote.output),
+                    profit=str(quote.profit),
+                ),
+            )
+            sold = await self._sell(
+                position.model_copy(
+                    update={
+                        "sell_provider_id": candidate.provider_id,
+                        "sell_quoted_gas_units": candidate.quote.estimated_gas_units,
+                    }
+                ),
+                plan,
+            )
+            if sold:
+                return quote
+            _LOGGER.warning(
+                "manual exit did not go through",
+                extra=log_fields(t_id=quote.t_id, provider=quote.provider),
+            )
+        return None
 
     async def _holding(self, t_id: str) -> Position | None:
         """Открытая сделка, ожидающая продажи.
@@ -424,25 +439,41 @@ class PositionWatcher:
                 return position
         return None
 
-    async def _best_exit(
-        self, position: Position
-    ) -> tuple[ExitQuote, ExecutionPlan, ExitCandidate] | None:
-        """Лучшее предложение выхода без оглядки на порог."""
+    async def _exit_candidates(self, position: Position) -> tuple[ExitCandidate, ...]:
+        """Все включённые агрегаторы по убыванию выгоды, без оглядки на порог."""
         if position.raw_acquired is None:
-            return None
+            return ()
         adapters = self._exit_adapters(position, immediate=False)
         if not adapters:
+            return ()
+        return await self._quote_exits(position, adapters, needed=None)
+
+    async def _describe_exit(
+        self, position: Position, candidate: ExitCandidate
+    ) -> tuple[ExitQuote, ExecutionPlan] | None:
+        """Обязательство одного агрегатора в понятном оператору виде.
+
+        Отказ собрать предложение не отменяет остальных кандидатов:
+        отвечать за весь выход один агрегатор не обязан.
+        """
+        try:
+            plan = await self._build_offer(candidate.adapter, candidate.request)
+        except Exception as error:  # noqa: BLE001 - отказ одного выхода не сбой сделки
+            _LOGGER.info(
+                "exit offer unavailable",
+                extra=log_fields(
+                    t_id=str(position.t_id),
+                    provider=candidate.provider_id.value,
+                    error=type(error).__name__,
+                    detail=str(error),
+                ),
+            )
             return None
-        candidates = await self._quote_exits(position, adapters, needed=None)
-        if not candidates:
-            return None
-        best = candidates[0]
-        plan = await self._build_offer(best.adapter, best.request)
         costs = await self._exit_costs_raw(position, plan)
         decimals = position.base_token.decimals
         quote = ExitQuote(
             t_id=str(position.t_id),
-            provider=best.provider_id.value,
+            provider=candidate.provider_id.value,
             output=Decimal(plan.min_output_raw).scaleb(-decimals),
             profit=Decimal(
                 position.profit_if_sold_for(plan.min_output_raw, raw_costs=costs or 0)
@@ -450,7 +481,7 @@ class PositionWatcher:
             symbol=str(position.base_token.symbol),
             costs_known=costs is not None,
         )
-        return quote, plan, best
+        return quote, plan
 
     async def _consider_exit(self, position: Position, *, immediate: bool) -> LongWaitNotice | None:
         """Проверить, выгодно ли продавать сейчас.
@@ -535,7 +566,7 @@ class PositionWatcher:
                     gas=_money(None if costs is None else Decimal(costs).scaleb(-decimals)),
                 ),
             )
-            await self._sell(
+            sold = await self._sell(
                 position.model_copy(
                     update={
                         # Продавец мог смениться: в ожидании выход
@@ -547,7 +578,17 @@ class PositionWatcher:
                 ),
                 transaction,
             )
-            return None
+            if sold:
+                return None
+            # Предложение не исполнилось: транзакция откатилась бы или
+            # книга не приняла заявку. Это не конец выхода — следующий
+            # кандидат ещё может сработать.
+            _LOGGER.info(
+                "exit offer did not go through",
+                extra=log_fields(t_id=str(position.t_id), provider=candidate.provider_id.value),
+            )
+            if observed is None or profit > observed:
+                observed, observed_costs = profit, costs
         if needed is None:  # pragma: no cover - без порога выход уже состоялся
             return None
         return self._wait(
@@ -765,8 +806,14 @@ class PositionWatcher:
         )
         return self._long_wait_notice(position)
 
-    async def _sell(self, position: Position, offer: ExecutionPlan) -> None:
+    async def _sell(self, position: Position, offer: ExecutionPlan) -> bool:
         """Проверить и исполнить продажу.
+
+        Возвращает, **пошла ли продажа**. Молчаливый отказ здесь
+        недопустим: предложение может не исполниться — транзакция
+        откатится на симуляции, заявку не примет книга, — и вызывающая
+        сторона обязана об этом узнать. Иначе оператор получает «продано»
+        по сделке, которая осталась на месте.
 
         Предложение приходит уже собранным: его собрали, чтобы узнать
         стоимость выхода, и собирать второй раз значило бы потратить
@@ -776,8 +823,7 @@ class PositionWatcher:
         транзакцией, другой — подписанной заявкой.
         """
         if not isinstance(offer, SwapTransaction):
-            await self._place_sell(position, offer)
-            return
+            return await self._place_sell(position, offer)
         transaction = offer
         simulation = await self._account.simulate(transaction, priority=_PRIORITY)
         if not simulation.succeeded:
@@ -785,7 +831,7 @@ class PositionWatcher:
                 "exit postponed: the swap would revert",
                 extra=log_fields(t_id=str(position.t_id), reason=simulation.revert_reason or ""),
             )
-            return
+            return False
         # Остаток до продажи запоминается перед отправкой: выручка —
         # это прирост, и прирост должен быть досчитан даже если квитанцию
         # подберёт уже другой процесс.
@@ -812,8 +858,9 @@ class PositionWatcher:
         )
         if receipt is not None:
             await self._settle_pending_sell(selling)
+        return True
 
-    async def _place_sell(self, position: Position, plan: SignedOrderPlan) -> None:
+    async def _place_sell(self, position: Position, plan: SignedOrderPlan) -> bool:
         """Исполнить продажу подписанной заявкой.
 
         Симуляции здесь нет и быть не может: транзакции не существует.
@@ -829,10 +876,10 @@ class PositionWatcher:
                 "exit postponed: signed orders are not available",
                 extra=log_fields(t_id=str(position.t_id)),
             )
-            return
+            return False
         adapter = self._adapters.get(position.sell_provider_id.value)
         if adapter is None:  # pragma: no cover - проверено вызывающим
-            return
+            return False
         # Остаток до продажи запоминается перед размещением: выручка —
         # это прирост, и досчитать его может уже другой процесс.
         before = await self._account.token_balance(position.base_token, priority=_PRIORITY)
@@ -851,9 +898,11 @@ class PositionWatcher:
         state = await self._orders.wait(adapter, placed, operation=OperationType.SELL)
         if state is None:
             # Заявка ещё в книге: сделка остаётся в SELLING, и следующий
-            # такт наблюдателя её подберёт.
-            return
+            # такт наблюдателя её подберёт. Размещение состоялось, и это
+            # не отказ — отсюда True.
+            return True
         await self._settle_order_sell(selling, state.outcome)
+        return True
 
     async def _settle_order_sell(self, position: Position, outcome: OrderOutcome) -> None:
         """Зафиксировать исход продажи, исполнявшейся заявкой."""
