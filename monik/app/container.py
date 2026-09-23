@@ -120,6 +120,7 @@ from monik.services.observability.logging import get_logger
 from monik.services.opportunity import OpportunityService
 from monik.services.opportunity.statistics import ConfirmationStatistics
 from monik.services.prices.conversion import ConversionService
+from monik.services.prices.market import MarketPriceProvider
 from monik.services.prices.providers import (
     AggregatorQuotePriceProvider,
     HttpPriceProvider,
@@ -143,6 +144,7 @@ from monik.services.trading import (
 )
 from monik.services.trading.costs import GasCostConverter
 from monik.services.trading.orders import SignedOrderRunner
+from monik.services.trading.price_guard import PriceGuard
 from monik.services.trading.reporting import TradeReporter
 from monik.services.updates import AptSystemUpdater, SystemUpdater
 
@@ -503,6 +505,31 @@ def build_container(
             poll_seconds=config.trading.order_poll_seconds,
             timeout_seconds=config.trading.order_timeout_seconds,
         )
+        # Независимый источник цен собирается только если он настроен:
+        # без него сверка не работает, и притворяться, что работает,
+        # нельзя (``the_main_rules.md``, правило 26).
+        market = (
+            MarketPriceProvider(
+                http=http_client(),
+                resources=resources,
+                clock=clock,
+                endpoint=config.prices.market_endpoint,
+                ttl_seconds=config.prices.market_ttl_seconds,
+                timeout_seconds=config.prices.request_timeout_seconds,
+            )
+            if config.prices.market_endpoint
+            else None
+        )
+        price_guard = PriceGuard(
+            source=market,
+            max_deviation_percent=config.trading.price_check_max_deviation_percent,
+            enabled=config.trading.price_check_enabled,
+        )
+        if config.trading.price_check_enabled and market is None:
+            _LOGGER.warning(
+                "price check is enabled but no market endpoint is configured: "
+                "trades will be opened without an independent price check"
+            )
         executor = TradeExecutor(
             adapters={key.value: value for key, value in provider_adapters.items()},
             positions=positions_store,
@@ -519,6 +546,7 @@ def build_container(
             # Не открываем того, что не сможем закрыть: порог входа — тот
             # же, при котором подсистема согласна выйти из уже открытой
             # сделки.
+            prices=price_guard,
             min_entry_profit_raw=int(
                 config.trading.min_exit_profit_waiting * (10 ** max(base_decimals.values()))
             ),
@@ -657,6 +685,8 @@ def _allowed_hosts(loaded: LoadedConfiguration) -> tuple[str, ...]:
             urls.extend(network.rpc_endpoints)
     if config.prices.http_endpoint:
         urls.append(config.prices.http_endpoint)
+    if config.prices.market_endpoint:
+        urls.append(config.prices.market_endpoint)
     if config.notifications.telegram.enabled:
         urls.append(config.notifications.telegram.api_base_url)
     return tuple(sorted({_host_of(url) for url in urls if url}))

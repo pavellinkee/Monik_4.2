@@ -21,6 +21,21 @@ application:
 # Сеть выключается собственным флагом enabled — тогда она не участвует в
 # сканировании вовсе (02_LEVEL1_SCANNER.md §72).
 networks:
+  # Добавлена 23.09 по решению оператора. Надбавка 0,15 gwei — медиана
+  # чаевых по замеру того же дня при base fee 0,17–0,32 gwei.
+  - network_id: ethereum
+    name: Ethereum
+    chain_id: 1
+    native_token_symbol: ETH
+    native_token_decimals: 18
+    wrapped_native_address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    base_token_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    rpc_url: "https://eth.drpc.org"
+    rpc_fallback_urls:
+      - "https://ethereum-rpc.publicnode.com"
+    emoji: "💎"
+    enabled: true
+    priority_fee_wei: 150000000
   - network_id: polygon
     name: Polygon
     chain_id: 137
@@ -38,7 +53,7 @@ networks:
       - "https://polygon.drpc.org"
     # Значок сети в уведомлении Telegram.
     emoji: "⛓️"
-    enabled: true
+    enabled: false
     # Надбавка к базовой цене газа. В Polygon за место в блоке идёт торг,
     # и сеть требует не меньше 25 gwei: без надбавки транзакция может не
     # попасть в блок вовсе. Значение то же, что действовало до вынесения
@@ -62,7 +77,7 @@ networks:
       - "https://arbitrum.drpc.org"
       - "https://arbitrum-one.public.blastapi.io"
     emoji: "🪀"
-    enabled: true
+    enabled: false
     # В Arbitrum торга за место в блоке нет: проверка живых блоков 18.09
     # показала, что все транзакции просят надбавку ноль и платят ровно
     # базовую цену — около 0,02 gwei. Надбавка в 30 gwei, действовавшая
@@ -209,7 +224,7 @@ providers:
     # три комбинации вместо двенадцати, порог при этом недостижим:
     # выбросы ловятся расхождением между двумя источниками цены, а не
     # внутри одного.
-    supported_networks: [polygon, arbitrum]
+    supported_networks: [polygon, arbitrum, ethereum]
     ui_urls:
       polygon: "https://app.uniswap.org/swap?chain=polygon"
       arbitrum: "https://app.uniswap.org/swap?chain=arbitrum"
@@ -242,7 +257,7 @@ providers:
     allow_same_provider_round_trip: true
     # Книга заявок работает без ключа доступа.
     requests_per_second: 4.0
-    supported_networks: [polygon]
+    supported_networks: [polygon, ethereum]
     ui_urls:
       polygon: "https://swap.cow.fi/#/137/swap"
     options:
@@ -298,8 +313,8 @@ providers:
 # задаётся разрешённый набор. decimals указывается явно и не выводится
 # из символа (01_PROJECT_REQUIREMENTS.md §10).
 tokens:
-    # Рабочий набор торгового прохода задан оператором 22.09:
-    # USDT, AAVE, WETH, WBTC. USDT — базовый токен круга, остальные три
+    # Рабочий набор торгового прохода задан оператором 23.09:
+    # USDT, WBTC, LINK, MaticX. USDT — базовый токен круга, остальные три
     # волатильны: правило 15 это разрешает, а риск удержания падающего
     # актива признан оператором приемлемым там же. Порог поднят до 0,3 %
     # под дрейф этих монет, а зависшую сделку оператор закрывает кнопкой
@@ -315,13 +330,49 @@ tokens:
     #
     # После правила 15 режим ann берёт все включённые токены, поэтому
     # остальные выключены явно — иначе они попали бы в торговый проход.
+  # --- Ethereum ---------------------------------------------------------
+  #
+  # Набор задан оператором 23.09: USDT, WBTC, WETH, UNI. Адреса сверены
+  # вызовами symbol()/decimals()/totalSupply() у контрактов сети: в
+  # индексах токенов под тикерами WETH и PEPE первыми идут однофамильцы,
+  # и брать первый попавшийся адрес нельзя.
+  - network_id: ethereum
+    address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    symbol: USDT
+    decimals: 6
+    usd_stable: true
+    rank: 1
+    enabled: true
+
+  - network_id: ethereum
+    address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+    symbol: WBTC
+    decimals: 8
+    rank: 2
+    enabled: true
+
+  - network_id: ethereum
+    address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    symbol: WETH
+    decimals: 18
+    rank: 3
+    enabled: true
+
+  - network_id: ethereum
+    address: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"
+    symbol: UNI
+    decimals: 18
+    rank: 4
+    enabled: true
+
+  # --- Polygon ----------------------------------------------------------
   - network_id: polygon
     address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
     symbol: USDT
     decimals: 6
     usd_stable: true
     rank: 1
-    enabled: true
+    enabled: false
 
   - network_id: polygon
     address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
@@ -350,7 +401,7 @@ tokens:
     symbol: WETH
     decimals: 18
     rank: 4
-    enabled: true
+    enabled: false
 
   - network_id: polygon
     address: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
@@ -364,7 +415,7 @@ tokens:
     symbol: WBTC
     decimals: 8
     rank: 6
-    enabled: true
+    enabled: false
 
   - network_id: polygon
     address: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
@@ -379,7 +430,7 @@ tokens:
     symbol: AAVE
     decimals: 18
     rank: 8
-    enabled: true
+    enabled: false
 
   - network_id: polygon
     address: "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39"
@@ -466,6 +517,7 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 1
+    enabled: false
 
   - network_id: arbitrum
     address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
@@ -473,6 +525,7 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 2
+    enabled: false
 
   - network_id: arbitrum
     # Мостовой USDC. Контракт в сети отвечает символом USDC — это
@@ -482,6 +535,7 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 3
+    enabled: false
 
   - network_id: arbitrum
     address: "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"
@@ -489,30 +543,35 @@ tokens:
     decimals: 18
     usd_stable: true
     rank: 4
+    enabled: false
 
   - network_id: arbitrum
     address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
     symbol: WETH
     decimals: 18
     rank: 5
+    enabled: false
 
   - network_id: arbitrum
     address: "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"
     symbol: WBTC
     decimals: 8
     rank: 6
+    enabled: false
 
   - network_id: arbitrum
     address: "0x912CE59144191C1204E64559FE8253a0e49E6548"
     symbol: ARB
     decimals: 18
     rank: 7
+    enabled: false
 
   - network_id: arbitrum
     address: "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4"
     symbol: LINK
     decimals: 18
     rank: 8
+    enabled: false
 
 routes:
   # Покупка и продажа у одного агрегатора. Архитектура это допускает при
@@ -570,7 +629,7 @@ scanner:
       # возврат к рабочей после наблюдения на 500. Газ от размера сделки
       # не зависит, поэтому на большей сумме он весит меньше, но 500 в
       # нынешний остаток не помещается.
-      amounts: ["100"]
+      amounts: ["395"]
       # Сети режима перечислены обе; работающая отмечена true. Включение
       # подготовленной сети — правка одного слова.
       #
@@ -579,8 +638,9 @@ scanner:
       # ($0,033 против $0,018 у Uniswap) и цена на паре USDT/DAI была
       # хуже. Arbitrum остаётся объявленным и включается одним словом.
       networks:
-        polygon: true
+        polygon: false
         arbitrum: false
+        ethereum: true
 
   level1:
     # Сумма поиска. Level 1 работает одной суммой: остальные Level 2
@@ -655,6 +715,11 @@ trading:
   # Цена узкого допуска — откаты, когда пул шевельнётся между сборкой и
   # включением в блок. Откат стоит только газа (в Arbitrum около $0,004) и
   # деньги не теряет: сделка просто не состоится.
+  # Сверка цены с независимым источником перед открытием сделки.
+  # Делается не на каждом проходе, а только у находки, дошедшей до
+  # траты денег: таких за сутки единицы (решение оператора 23.09).
+  price_check_enabled: true
+  price_check_max_deviation_percent: "2"
   slippage_percent: "0.01"
   # Допуск ноги, исполняемой подписанным намерением. Ноль по решению
   # оператора 19.09: неисполненная заявка не стоит ничего — её просто не
@@ -753,6 +818,12 @@ gas:
 prices:
   enabled: true
   sources: [aggregator_quote]
+  # Независимый источник рыночной цены. В расчёте прибыли не участвует:
+  # он нужен, чтобы сверить цену предложения перед тратой денег
+  # (the_main_rules.md, правило 26). Бесплатный тариф принимает один
+  # адрес за запрос, поэтому цена каждого токена кешируется.
+  market_endpoint: "https://api.coingecko.com/api/v3"
+  market_ttl_seconds: 300
   freshness_seconds: 300
   request_timeout_seconds: 5.0
 

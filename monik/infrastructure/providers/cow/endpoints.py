@@ -47,12 +47,17 @@ DEFAULT_BASE_URL = "https://api.cow.fi"
 #: непроверенную поддержку адаптер не заявляет.
 SUPPORTED_NETWORK_SLUGS: dict[str, str] = {
     "polygon": "polygon",
+    # У CoW основная сеть Ethereum называется в адресе ``mainnet``, а не
+    # ``ethereum``: это и есть переходник между нашим идентификатором и
+    # их. Проверено живым запросом 2026-09-22.
+    "ethereum": "mainnet",
 }
 
 #: Идентификаторы цепей заявленных сетей. Входят в домен подписи, и
 #: ошибка здесь сделала бы подпись недействительной.
 SUPPORTED_CHAIN_IDS: dict[str, int] = {
     "polygon": 137,
+    "ethereum": 1,
 }
 
 #: Контракт расчётов. Он же ``verifyingContract`` домена EIP-712 и

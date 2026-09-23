@@ -55,6 +55,7 @@ from monik.services.trading.ports import (
     PositionStore,
     SequenceSource,
 )
+from monik.services.trading.price_guard import PriceGuard
 from monik.services.trading.sender import TransactionSender
 
 __all__ = ["TradeExecutor"]
@@ -97,6 +98,7 @@ class TradeExecutor:
         is_execution_open: Callable[[], bool],
         slippage_bps: int,
         min_entry_profit_raw: int,
+        prices: PriceGuard | None = None,
         order_slippage_bps: int = 0,
         orders: SignedOrderRunner | None = None,
         max_offer_checks: int = 10,
@@ -116,6 +118,10 @@ class TradeExecutor:
         self._is_execution_open = is_execution_open
         self._slippage_bps = slippage_bps
         self._min_entry_profit_raw = min_entry_profit_raw
+        #: Сверка цены с независимым источником. Без неё решение
+        #: принимается только по обязательству агрегатора, а оно считается
+        #: по тому же маршруту, что и обещание.
+        self._prices = prices or PriceGuard(source=None, max_deviation_percent=Decimal(0))
         #: Допуск ноги, исполняемой намерением. Отдельный от общего,
         #: потому что промах у неё бесплатен.
         self._order_slippage_bps = order_slippage_bps
@@ -411,6 +417,20 @@ class TradeExecutor:
             ),
         )
         if not await self._offer_allows(choice, transaction):
+            return None
+        # Сверка с рынком делается здесь, а не в проходе: до этой строки
+        # доходит одна находка из тысяч, и запрос к источнику курсов
+        # тратится только на неё (``the_main_rules.md``, правило 26).
+        if not await self._prices.allows(
+            paying=choice.base,
+            receiving=choice.target,
+            raw_paid=choice.candidate.buy_quote.input_amount.raw,
+            raw_received=transaction.min_output_raw,
+        ):
+            _LOGGER.warning(
+                "trade cancelled: the price does not match an independent source",
+                extra=self._describe(choice),
+            )
             return None
         if isinstance(transaction, SwapTransaction):
             simulation = await self._account.simulate(transaction, priority=_PRIORITY)

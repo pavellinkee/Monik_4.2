@@ -151,9 +151,18 @@ class PriceConfig(ConfigSection):
     freshness_seconds: int = Field(default=300, ge=1, le=86_400)
     request_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     http_endpoint: str | None = Field(default=None, max_length=512)
+    #: Независимый источник рыночной цены. Не участвует в конверсии газа
+    #: и в расчёте прибыли: он нужен, чтобы сверить цену агрегатора с
+    #: рынком перед тратой денег (``the_main_rules.md``, правило 26).
+    market_endpoint: str | None = Field(default=None, max_length=512)
+    #: Сколько держать рыночную цену в памяти. Проверка вызывается редко,
+    #: но две подряд не должны стоить двух запросов.
+    market_ttl_seconds: int = Field(default=300, ge=1, le=86_400)
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
+        if self.market_endpoint is not None and not self.market_endpoint.startswith("https://"):
+            raise ValueError("market_endpoint must use https")
         if not self.sources:
             raise ValueError("at least one price source must be configured")
         if len(set(self.sources)) != len(self.sources):
