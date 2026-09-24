@@ -234,21 +234,12 @@ class ScannerConfig(ConfigSection):
             raise ValueError(
                 "at least one scan mode must be enabled: Level 1 would never run otherwise"
             )
-        # Таймаут цикла проверяется по самому частому включённому режиму
-        # из тех, что пользуются общим сроком: иначе его проходы
-        # накладывались бы по построению. Режим со своим сроком проверен
-        # собственным валидатором и общий не ограничивает — иначе один
-        # быстрый режим диктовал бы срок всем остальным.
-        shared = [
-            self.modes.for_mode(mode).interval_seconds
-            for mode in self.modes.enabled_modes()
-            if self.modes.for_mode(mode).scan_timeout_seconds is None
-        ]
-        if shared and self.level1.scan_timeout_seconds > min(shared):
-            raise ValueError(
-                f"scan_timeout_seconds ({self.level1.scan_timeout_seconds}) must not exceed the "
-                f"shortest enabled mode interval ({min(shared)}), otherwise scans would overlap"
-            )
+        # Проверки общего срока против интервалов больше нет: режим без
+        # собственного значения получает срок, равный своему интервалу
+        # (``scan_timeout_for``), и превысить его не может по построению.
+        # Прежняя проверка запрещала общему сроку быть больше самого
+        # частого режима, и из-за неё срок переставал следовать за
+        # интервалом: подняв интервал, оператор получал прежний срок.
         return self
 
     def amounts_for(self, mode: ScanMode) -> tuple[PositiveDecimal, ...]:
@@ -257,9 +248,27 @@ class ScannerConfig(ConfigSection):
         return own if own is not None else self.amounts
 
     def scan_timeout_for(self, mode: ScanMode) -> int:
-        """Предельная длительность прохода режима."""
+        """Предельная длительность прохода режима.
+
+        Без собственного значения срок **равен интервалу режима**:
+        оператор задаёт частоту, а срок следует за ней. Поставит 10
+        секунд — проход получит 10; поставит 45 — получит 45, и держать
+        два числа согласованными руками не придётся
+        (``the_main_rules.md``, правило 28).
+
+        Так наложение проходов становится невозможным **по построению**,
+        а не по проверке конфигурации: срок не может превысить интервал,
+        потому что он ему равен.
+
+        Общий ``level1.scan_timeout_seconds`` остаётся запасным для
+        режима, у которого интервала нет; у режимов с расписанием по
+        интервалу он больше ничего не ограничивает.
+        """
         own = self.modes.for_mode(mode).scan_timeout_seconds
-        return own if own is not None else self.level1.scan_timeout_seconds
+        if own is not None:
+            return own
+        interval = self.modes.for_mode(mode).interval_seconds
+        return interval if interval is not None else self.level1.scan_timeout_seconds
 
     @property
     def level1_amount(self) -> PositiveDecimal:

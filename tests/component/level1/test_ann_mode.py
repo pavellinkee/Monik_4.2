@@ -246,27 +246,43 @@ class TestModeAmounts:
 
 
 class TestModeTimeout:
-    """Срок прохода тоже принадлежит режиму.
+    """Срок прохода принадлежит режиму и следует за его интервалом.
 
-    Проход обязан укладываться в свой интервал, иначе его запуски
-    накладываются по построению. Интервалы у режимов разные, и общий
-    срок пришлось бы равнять по самому быстрому — что обрезало бы
-    медленный обход всего набора токенов.
+    Оператор задаёт частоту, а срок ей соответствует: поставит 10 —
+    проход получит 10, поставит 45 — получит 45
+    (``the_main_rules.md``, правило 28). Так наложение проходов
+    становится невозможным по построению, а не по проверке.
     """
 
-    def test_fast_mode_may_keep_its_own_deadline(
-        self, database: Database, clock: FakeClock
-    ) -> None:
+    def test_the_deadline_follows_the_interval(self, database: Database, clock: FakeClock) -> None:
+        """Без собственного значения срок равен интервалу режима.
+
+        Прежде он брался из общей настройки, и подняв интервал, оператор
+        получал прежний срок: два числа приходилось держать
+        согласованными руками.
+        """
         document = _stable_document()
         document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 240}
         document["scanner"]["modes"] = {
             "ur": {"enabled": True, "interval_seconds": 300},
-            "ann": {"enabled": True, "interval_seconds": 10, "scan_timeout_seconds": 10},
+            "ann": {"enabled": True, "interval_seconds": 45},
+        }
+        configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
+
+        assert configuration.scanner.scan_timeout_for(ScanMode.ANN) == 45
+        assert configuration.scanner.scan_timeout_for(ScanMode.UR) == 300
+
+    def test_an_own_deadline_still_wins(self, database: Database, clock: FakeClock) -> None:
+        """Явно заданный срок остаётся главнее вывода из интервала."""
+        document = _stable_document()
+        document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 240}
+        document["scanner"]["modes"] = {
+            "ur": {"enabled": True, "interval_seconds": 300},
+            "ann": {"enabled": True, "interval_seconds": 45, "scan_timeout_seconds": 10},
         }
         configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
 
         assert configuration.scanner.scan_timeout_for(ScanMode.ANN) == 10
-        assert configuration.scanner.scan_timeout_for(ScanMode.UR) == 240
 
     def test_deadline_longer_than_the_mode_interval_is_rejected(self) -> None:
         document = _stable_document()
@@ -277,14 +293,20 @@ class TestModeTimeout:
         with pytest.raises(Exception, match="must not exceed the mode interval"):
             parse_configuration(document, environ=dict(VALID_ENV))
 
-    def test_fast_mode_without_its_own_deadline_still_constrains_the_common_one(self) -> None:
-        """Режим без своего срока по-прежнему ограничивает общий."""
+    def test_a_large_common_deadline_no_longer_binds_a_fast_mode(self) -> None:
+        """Общий срок больше не диктует режиму с интервалом.
+
+        Прежде такая конфигурация отвергалась целиком. Теперь быстрый
+        режим просто берёт свой интервал, и наложиться его проходы не
+        могут: срок равен интервалу.
+        """
         document = _stable_document()
         document["scanner"]["level1"] = {"amount": "50", "scan_timeout_seconds": 240}
         document["scanner"]["modes"] = {"ann": {"enabled": True, "interval_seconds": 10}}
 
-        with pytest.raises(Exception, match="shortest enabled mode interval"):
-            parse_configuration(document, environ=dict(VALID_ENV))
+        configuration = parse_configuration(document, environ=dict(VALID_ENV)).config
+
+        assert configuration.scanner.scan_timeout_for(ScanMode.ANN) == 10
 
 
 class TestModePriorities:

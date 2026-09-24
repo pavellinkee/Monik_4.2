@@ -103,6 +103,11 @@ def scan_task_name(mode: ScanMode) -> str:
 
 TASK_NOTIFICATIONS = "notification_delivery"
 TASK_POSITIONS = "position_watch"
+#: Запас между сроком прохода и отменой его задачи, в секундах.
+#: Мягкий срок сканера должен успеть сработать первым: он сохраняет
+#: найденное, а отмена задачи — нет.
+_SCAN_CANCEL_MARGIN_SECONDS = 5
+
 TASK_TRADE = "trade_execution"
 TASK_TRADE_REPORT = "trade_report"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
@@ -472,7 +477,16 @@ def build_application(
             # правило 13). Здесь оно только попадает в журнал: очередь
             # выстраивают сами запросы, а не задача расписания.
             priority=search_priority(mode, OperationType.BUY),
-            timeout=timedelta(seconds=config.scanner.scan_timeout_for(mode)),
+            # Срок задачи чуть больше срока самого прохода. Свой срок
+            # сканер отрабатывает мягко: уже собранные кандидаты не
+            # выбрасываются, возможности из них создаются, и находка
+            # доходит до очереди. Отмена задачи такого не умеет — она
+            # обрывает всё. Запас нужен, чтобы выигрывал мягкий путь, а
+            # жёсткая отмена осталась страховкой на случай зависания
+            # (``the_main_rules.md``, правило 28).
+            timeout=timedelta(
+                seconds=config.scanner.scan_timeout_for(mode) + _SCAN_CANCEL_MARGIN_SECONDS
+            ),
         )
     if container.watcher is not None:
         # Ведение открытых сделок не зависит от того, разрешено ли

@@ -327,13 +327,31 @@ class TestCrossFieldValidation:
         with pytest.raises(ConfigurationError, match="threshold is not set"):
             _load(document, env)
 
-    def test_scan_timeout_longer_than_the_fastest_mode_is_rejected(
+    def test_the_scan_deadline_follows_the_mode_interval(
         self, document: dict[str, Any], env: dict[str, str]
     ) -> None:
-        """Таймаут не может превышать самый частый включённый режим."""
+        """Срок прохода выводится из интервала режима, а не из общего.
+
+        Прежде общий срок, превышающий самый частый режим, отвергал всю
+        конфигурацию. Теперь режим берёт свой интервал, и наложение
+        невозможно по построению: срок равен интервалу
+        (``the_main_rules.md``, правило 28).
+        """
         document["scanner"]["modes"] = {"fest": {"enabled": True, "interval_seconds": 60}}
         document["scanner"]["level1"] = {"scan_timeout_seconds": 120}
-        with pytest.raises(ConfigurationError, match="scan_timeout_seconds"):
+
+        configuration = _load(document, env)
+
+        assert configuration.scanner.scan_timeout_for(ScanMode.FEST) == 60
+
+    def test_an_own_scan_deadline_may_not_exceed_its_interval(
+        self, document: dict[str, Any], env: dict[str, str]
+    ) -> None:
+        """Явно заданный срок по-прежнему обязан укладываться в интервал."""
+        document["scanner"]["modes"] = {
+            "fest": {"enabled": True, "interval_seconds": 60, "scan_timeout_seconds": 120}
+        }
+        with pytest.raises(ConfigurationError, match="must not exceed the mode interval"):
             _load(document, env)
 
     def test_all_modes_disabled_is_rejected(
