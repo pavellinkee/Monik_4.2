@@ -70,6 +70,7 @@ __all__ = [
     "scan_task_name",
     "TASK_NOTIFICATIONS",
     "TASK_POSITIONS",
+    "TASK_TRADE",
     "TASK_TRADE_REPORT",
     "TASK_BACKUP",
     "TASK_SYSTEM_HEALTH",
@@ -102,6 +103,7 @@ def scan_task_name(mode: ScanMode) -> str:
 
 TASK_NOTIFICATIONS = "notification_delivery"
 TASK_POSITIONS = "position_watch"
+TASK_TRADE = "trade_execution"
 TASK_TRADE_REPORT = "trade_report"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
 TASK_CAPABILITY_LOAD = "capability_load"
@@ -489,6 +491,24 @@ def build_application(
             # берётся у режима возможности, а не отсюда.
             priority=RequestPriority.UR_LEVEL2,
         )
+    if container.executor is not None:
+        # Решение по находкам — своя задача со своим сроком: она не
+        # делит время с поиском, а поиск её не прерывает
+        # (``the_main_rules.md``, правило 27).
+        registry.register(
+            TASK_TRADE,
+            _trade_task(container),
+            config=config.scheduler,
+            default=TaskScheduleConfig(
+                mode=TaskMode.INTERVAL,
+                interval_seconds=config.trading.trade_interval_seconds,
+            ),
+            priority=RequestPriority.ANN_BUY,
+            # Срок покрывает всю сделку целиком: сборку обязательств,
+            # сверку цены, отправку и ожидание квитанции. Прерывать
+            # начатую сделку нельзя — деньги уже в пути.
+            timeout=timedelta(seconds=config.trading.trade_timeout_seconds),
+        )
     if container.reporter is not None:
         # Отчёт проверяется чаще, чем отправляется: он сам решает, истёк
         # ли промежуток. Иначе такт планировщика и период отчёта
@@ -758,16 +778,48 @@ def _scan_task(container: Container, mode: ScanMode) -> TaskHandler:
             # Ни одна сеть не дала завершённого цикла: состояние подсистемы
             # не обновляется, причина уже записана в журнал.
             return
-        if mode is ScanMode.ANN and container.executor is not None:
+        if mode is ScanMode.ANN and container.findings is not None:
             # Находки торгового режима потребляет подсистема исполнения, а
-            # не Level 2. Решение принимает она: сканер только сообщает,
-            # что нашёл (``the_main_rules.md``, правило 11).
-            await container.executor.consider(results)
+            # не Level 2, и вызывается она **не отсюда**: проход только
+            # кладёт найденное в очередь и заканчивается
+            # (``the_main_rules.md``, правила 11 и 27). Пока это был один
+            # вызов, срок прохода был и сроком сделки, и 24.09 все три
+            # находки погибли от истечения срока.
+            container.findings.offer(results)
         container.health.set_component(
             "level1",
             ApplicationHealthStatus.HEALTHY,
             reason=f"последний цикл {container.clock.now().isoformat(timespec='seconds')}",
         )
+
+    return run
+
+
+def _trade_task(container: Container) -> TaskHandler:
+    """Решение по находкам прохода.
+
+    Отдельная задача со своим сроком. Она не делит время с поиском, и
+    поиск её не прерывает: начатую сделку останавливать нельзя — деньги
+    уже в пути (``the_main_rules.md``, правило 27).
+
+    Очередь проверяется часто, но пустая проверка ничего не стоит: она
+    целиком в памяти. Пока идёт сделка, следующие такты пропускаются
+    политикой наложения — задача не перебивает сама себя.
+    """
+
+    async def run() -> None:
+        executor = container.executor
+        queue = container.findings
+        if executor is None or queue is None:
+            return
+        if container.trading is not None and not container.trading.is_open:
+            # Торговля остановлена оператором. Находки при этом не
+            # копятся: очередь держит только последнюю пачку.
+            return
+        results = queue.take()
+        if not results:
+            return
+        await executor.consider(results)
 
     return run
 

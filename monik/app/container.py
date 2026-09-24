@@ -144,6 +144,7 @@ from monik.services.trading import (
 )
 from monik.services.trading.costs import GasCostConverter
 from monik.services.trading.orders import SignedOrderRunner
+from monik.services.trading.pending import FindingQueue
 from monik.services.trading.price_guard import PriceGuard
 from monik.services.trading.reporting import TradeReporter
 from monik.services.updates import AptSystemUpdater, SystemUpdater
@@ -241,6 +242,9 @@ class Container:
     trading: TradingSwitch | None = None
     executor: TradeExecutor | None = None
     watcher: PositionWatcher | None = None
+    #: Находки, ожидающие решения подсистемы исполнения. Связывает две
+    #: задачи: проход кладёт, исполнение забирает.
+    findings: FindingQueue | None = None
     reporter: TradeReporter | None = None
 
     async def aclose(self) -> None:
@@ -473,6 +477,10 @@ def build_container(
     trading_switch = TradingSwitch(allowed=config.trading.execution_enabled)
     executor: TradeExecutor | None = None
     watcher: PositionWatcher | None = None
+    #: Очередь находок объявляется рядом с исполнителем и по той же
+    #: причине: без торговли её не бывает, а ссылаться на неё сборка
+    #: обязана в любом случае.
+    findings: FindingQueue | None = None
     reporter: TradeReporter | None = None
     # Хранилище сделок нужно и без кошелька: отчёт показывает прошлое,
     # даже когда торговать нечем.
@@ -530,6 +538,7 @@ def build_container(
                 "price check is enabled but no market endpoint is configured: "
                 "trades will be opened without an independent price check"
             )
+        findings = FindingQueue(clock=clock, ttl_seconds=config.trading.finding_ttl_seconds)
         executor = TradeExecutor(
             adapters={key.value: value for key, value in provider_adapters.items()},
             positions=positions_store,
@@ -654,6 +663,7 @@ def build_container(
         trading=trading_switch,
         executor=executor,
         watcher=watcher,
+        findings=findings,
         reporter=reporter,
     )
 

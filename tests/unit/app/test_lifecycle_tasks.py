@@ -17,9 +17,12 @@ from dataclasses import dataclass
 import pytest
 
 from monik.app.control import TradingSwitch
-from monik.app.lifecycle import _budget_allows, _search_allowed
+from monik.app.lifecycle import _budget_allows, _search_allowed, _trade_task
 from monik.app.trade_buttons import sell_buttons
 from monik.domain.enums.modes import ScanMode
+from monik.services.observability import FakeClock
+from monik.services.trading.pending import FindingQueue
+from tests import factories as f
 
 
 @dataclass
@@ -204,3 +207,83 @@ class TestLongWaitButton:
         """Уведомлений может висеть несколько, и каждое ведёт к своему."""
         assert sell_buttons("#T41")[0][0].callback_data != sell_buttons("#T42")[0][0].callback_data
         assert "#T41" in sell_buttons("#T41")[0][0].callback_data
+
+
+class _TradeExecutor:
+    """Исполнитель, запоминающий переданные находки."""
+
+    def __init__(self) -> None:
+        self.considered: list[object] = []
+
+    async def consider(self, results: object) -> None:
+        self.considered.append(results)
+
+
+@dataclass
+class _TradeContainer:
+    executor: _TradeExecutor | None
+    findings: FindingQueue | None
+    trading: TradingSwitch | None
+
+
+def _trade_container(
+    *, allowed: bool = True, started: bool = True, offered: object | None = ("находка",)
+) -> _TradeContainer:
+    clock = FakeClock(f.NOW)
+    queue = FindingQueue(clock=clock, ttl_seconds=60)
+    if offered is not None:
+        queue.offer(offered)  # type: ignore[arg-type]
+    return _TradeContainer(
+        executor=_TradeExecutor(),
+        findings=queue,
+        trading=_switch(allowed=allowed, started=started),
+    )
+
+
+class TestTradeTaskIsSeparate:
+    """Решение по находкам — своя задача со своим сроком.
+
+    24.09 все три находки, прошедшие порог, погибли от ``task timed
+    out``: исполнитель делил срок с проходом, и на сборку обязательств
+    времени не оставалось (``the_main_rules.md``, правило 27).
+    """
+
+    async def test_findings_reach_the_executor(self) -> None:
+        container = _trade_container()
+
+        await _trade_task(container)()  # type: ignore[arg-type]
+
+        assert container.executor is not None
+        assert container.executor.considered == [("находка",)]
+
+    async def test_an_empty_queue_costs_nothing(self) -> None:
+        container = _trade_container(offered=None)
+
+        await _trade_task(container)()  # type: ignore[arg-type]
+
+        assert container.executor is not None
+        assert container.executor.considered == []
+
+    async def test_stopped_trading_leaves_findings_alone(self) -> None:
+        """Оператор остановил торговлю — исполнитель не вызывается."""
+        container = _trade_container(started=False)
+
+        await _trade_task(container)()  # type: ignore[arg-type]
+
+        assert container.executor is not None
+        assert container.executor.considered == []
+
+    async def test_a_finding_is_considered_once(self) -> None:
+        """Второй такт не рассматривает то же самое заново."""
+        container = _trade_container()
+
+        await _trade_task(container)()  # type: ignore[arg-type]
+        await _trade_task(container)()  # type: ignore[arg-type]
+
+        assert container.executor is not None
+        assert len(container.executor.considered) == 1
+
+    async def test_without_trading_the_task_does_nothing(self) -> None:
+        container = _TradeContainer(executor=None, findings=None, trading=None)
+
+        await _trade_task(container)()  # type: ignore[arg-type]
