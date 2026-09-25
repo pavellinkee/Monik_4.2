@@ -34,7 +34,7 @@ networks:
     rpc_fallback_urls:
       - "https://ethereum-rpc.publicnode.com"
     emoji: "💎"
-    enabled: true
+    enabled: false
     priority_fee_wei: 150000000
   - network_id: polygon
     name: Polygon
@@ -53,7 +53,7 @@ networks:
       - "https://polygon.drpc.org"
     # Значок сети в уведомлении Telegram.
     emoji: "⛓️"
-    enabled: false
+    enabled: true
     # Надбавка к базовой цене газа. В Polygon за место в блоке идёт торг,
     # и сеть требует не меньше 25 gwei: без надбавки транзакция может не
     # попасть в блок вовсе. Значение то же, что действовало до вынесения
@@ -245,7 +245,7 @@ providers:
     # заявку исполняет решатель, который может взять её на себя или
     # свести со встречной, — и потому расхождение с пулом у него на
     # порядок больше, чем между маршрутизаторами поверх тех же пулов.
-    enabled: false
+    enabled: true
     # Только торговый проход: в ur и fest он не нужен, а его заявки
     # живут минутами и к частому сканированию отношения не имеют.
     modes: [ann]
@@ -342,21 +342,21 @@ tokens:
     decimals: 6
     usd_stable: true
     rank: 1
-    enabled: true
+    enabled: false
 
   - network_id: ethereum
     address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
     symbol: WBTC
     decimals: 8
     rank: 2
-    enabled: true
+    enabled: false
 
   - network_id: ethereum
     address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
     symbol: WETH
     decimals: 18
     rank: 3
-    enabled: true
+    enabled: false
 
   - network_id: ethereum
     address: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"
@@ -366,13 +366,32 @@ tokens:
     enabled: false
 
   # --- Polygon ----------------------------------------------------------
+
+  - network_id: ethereum
+    address: "0x57e114B691Db790C35207b2e685D4A43181e6061"
+    symbol: ENA
+    decimals: 18
+    rank: 5
+    enabled: false
+
+  # Канонический PEPE. Под этим тикером в Ethereum есть второй контракт
+  # (0xbe042e9d09CB588331Ff911c2B46FD833A3E5bd6), и различить их нельзя
+  # ни по символу, ни по имени — оба отвечают PEPE и «Pepe». Различает
+  # только эмиссия: у настоящего 420 689 899 645 077, у однофамильца
+  # ровно миллиард. Сверено вызовами контрактов 24.09.
+  - network_id: ethereum
+    address: "0x6982508145454Ce325dDbE47a25d4ec3d2311933"
+    symbol: PEPE
+    decimals: 18
+    rank: 6
+    enabled: false
   - network_id: polygon
     address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
     symbol: USDT
     decimals: 6
     usd_stable: true
     rank: 1
-    enabled: false
+    enabled: true
 
   - network_id: polygon
     address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
@@ -401,7 +420,7 @@ tokens:
     symbol: WETH
     decimals: 18
     rank: 4
-    enabled: false
+    enabled: true
 
   - network_id: polygon
     address: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
@@ -415,7 +434,7 @@ tokens:
     symbol: WBTC
     decimals: 8
     rank: 6
-    enabled: false
+    enabled: true
 
   - network_id: polygon
     address: "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
@@ -618,7 +637,7 @@ scanner:
       # точки по частоте к CoW Swap: 0,20 и 0,27 держатся, 0,30
       # продержалась час, 0,375 закрыли через двадцать шесть минут.
       # Двадцать пять секунд дают 0,24 — внутри проверенного.
-      interval_seconds: 15
+      interval_seconds: 20
       # Свой срок прохода: общий (25 с) в такой интервал не укладывается,
       # а понижать его для всех нельзя — медленный обход всего набора
       # токенов в режиме ur столько не успевает.
@@ -629,7 +648,7 @@ scanner:
       # возврат к рабочей после наблюдения на 500. Газ от размера сделки
       # не зависит, поэтому на большей сумме он весит меньше, но 500 в
       # нынешний остаток не помещается.
-      amounts: ["395"]
+      amounts: ["394"]
       # Сети режима перечислены обе; работающая отмечена true. Включение
       # подготовленной сети — правка одного слова.
       #
@@ -638,9 +657,9 @@ scanner:
       # ($0,033 против $0,018 у Uniswap) и цена на паре USDT/DAI была
       # хуже. Arbitrum остаётся объявленным и включается одним словом.
       networks:
-        polygon: false
+        polygon: true
         arbitrum: false
-        ethereum: true
+        ethereum: false
 
   level1:
     # Сумма поиска. Level 1 работает одной суммой: остальные Level 2

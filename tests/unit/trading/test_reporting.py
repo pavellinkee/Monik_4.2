@@ -497,3 +497,112 @@ class TestReportButtons:
 
         assert await reporter.tick() is True
         assert not notifier.buttons
+
+
+class TestUnfilledAttempts:
+    """Несостоявшаяся попытка — не завершённая сделка.
+
+    25.09 отчёт назвал неисполненную заявку «завершённой сделкой с
+    неизвестным итогом», и это прочиталось как убыток, которого не было:
+    деньги не двигались вовсе (``the_main_rules.md``, правило 29).
+    """
+
+    def _failed(self, **overrides: object) -> Position:
+        base: dict[str, object] = {
+            "status": PositionStatus.FAILED,
+            "raw_acquired": None,
+            "raw_returned": 50_000_000,
+            "raw_gas_cost": None,
+        }
+        base.update(overrides)
+        return _position(**base)
+
+    def test_an_unfilled_attempt_is_not_a_completed_trade(self) -> None:
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(self._failed(buy_order_uid="0x" + "ab" * 28),),
+            open_now=(),
+            scans=ScanSummary(passes=84, best_net_roi=Decimal("1.2498")),
+        )
+
+        assert "Сделок завершено: нет" in text
+        assert "Сделок не состоялось: 1" in text
+        assert "неизвестн" not in text, "итог не выдумывается и не называется неизвестным"
+
+    def test_an_unfilled_attempt_does_not_enter_the_total(self) -> None:
+        """Иначе сумма промежутка врала бы на несостоявшуюся сделку."""
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(
+                _position(raw_input=100_000_000, raw_returned=100_050_000, raw_gas_cost=6_000),
+                self._failed(buy_order_uid="0x" + "ab" * 28),
+            ),
+            open_now=(),
+            scans=ScanSummary(passes=84, best_net_roi=None),
+        )
+
+        assert "Сделок завершено: 1" in text
+        assert "Итог промежутка: +0.04 USDT" in text
+        assert "Сделок не состоялось: 1" in text
+
+    def test_an_unfilled_order_names_its_reason(self) -> None:
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(self._failed(buy_order_uid="0x" + "ab" * 28),),
+            open_now=(),
+            scans=ScanSummary(passes=1, best_net_roi=None),
+        )
+
+        assert "заявку никто не взял" in text
+        assert "деньги не тронуты" in text
+
+    def test_a_reverted_purchase_names_its_reason(self) -> None:
+        """Откат сети стоил газа, и это не то же, что неисполненная заявка."""
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(self._failed(buy_tx_hash="0x" + "cd" * 32),),
+            open_now=(),
+            scans=ScanSummary(passes=1, best_net_roi=None),
+        )
+
+        assert "покупку откатила сеть" in text
+        assert "газ" in text
+
+    def test_a_purchase_never_sent_names_its_reason(self) -> None:
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(self._failed(),),
+            open_now=(),
+            scans=ScanSummary(passes=1, best_net_roi=None),
+        )
+
+        assert "не была отправлена" in text
+
+    def test_a_real_unknown_result_is_still_reported(self) -> None:
+        """У завершённой сделки неизвестный итог остаётся неизвестным.
+
+        Это тревожный случай, и смешивать его с несостоявшейся попыткой
+        нельзя: там считать нечего, а здесь посчитать не удалось.
+        """
+        text = report_text(
+            since=SINCE,
+            until=UNTIL,
+            trading_state="идёт",
+            closed=(_position(raw_returned=100_000_000, raw_gas_cost=None),),
+            open_now=(),
+            scans=ScanSummary(passes=1, best_net_roi=None),
+        )
+
+        assert "Сделок завершено: 1" in text
+        assert "итог неизвестен" in text
+        assert "Сделок с неизвестным итогом: 1" in text

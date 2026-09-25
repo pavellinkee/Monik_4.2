@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
+from monik.domain.enums.trading import PositionStatus
 from monik.domain.models.position import Position
 from monik.domain.models.scan import ScanSummary
 from monik.domain.value_objects.timestamps import UtcDatetime
@@ -176,6 +177,22 @@ def closing_text(position: Position) -> str:
     return "\n".join(lines)
 
 
+def _unfilled_reason(position: Position) -> str:
+    """Почему сделка не состоялась.
+
+    Причина видна по тому, что успело остаться в записи: заявку с
+    идентификатором книга не взяла, транзакцию с хешем сеть откатила, а
+    запись без того и другого означает, что отправить не удалось вовсе.
+    Деньги во всех трёх случаях не тронуты, и сказать это прямо важнее,
+    чем обойтись общим словом.
+    """
+    if position.buy_order_uid is not None:
+        return "заявку никто не взял, деньги не тронуты"
+    if position.buy_tx_hash is not None:
+        return "покупку откатила сеть, потрачен только газ"
+    return "покупка не была отправлена, деньги не тронуты"
+
+
 def report_text(
     *,
     since: UtcDatetime,
@@ -198,11 +215,19 @@ def report_text(
         f"📊 Отчёт ann за {_local(since, timezone)}–{_local(until, timezone)}",
         f"Торговля: {trading_state}",
     ]
-    if closed:
-        lines.append(f"Сделок завершено: {len(closed)}")
+    # Несостоявшаяся попытка — не завершённая сделка. Записи различаются
+    # статусом, но обе несут время закрытия и обе попадают в выборку
+    # отчётного промежутка. Смешивать их нельзя: 25.09 отчёт назвал
+    # неисполненную заявку «завершённой сделкой с неизвестным итогом», и
+    # это прочиталось как убыток, которого не было
+    # (``the_main_rules.md``, правило 29).
+    done = tuple(item for item in closed if item.status is not PositionStatus.FAILED)
+    unfilled = tuple(item for item in closed if item.status is PositionStatus.FAILED)
+    if done:
+        lines.append(f"Сделок завершено: {len(done)}")
         total = Decimal(0)
         unknown = 0
-        for position in closed:
+        for position in done:
             result = position.net_result
             if result is None:
                 unknown += 1
@@ -215,13 +240,23 @@ def report_text(
                 f"{position.sell_provider_id.value} {position.target_token.symbol} "
                 f"{money(position.input_amount)} → {shown}"
             )
-        lines.append(f"Итог промежутка: {money(total, sign=True)} {closed[0].base_token.symbol}")
+        lines.append(f"Итог промежутка: {money(total, sign=True)} {done[0].base_token.symbol}")
         if unknown:
             # Неизвестный итог не превращается в ноль: он бы тихо
-            # улучшил сводку (``CLAUDE.md`` §12).
+            # улучшил сводку (``CLAUDE.md`` §12). Здесь он означает
+            # настоящую сделку, результат которой посчитать не удалось, —
+            # случай тревожный и с несостоявшейся попыткой не смешанный.
             lines.append(f"Сделок с неизвестным итогом: {unknown}")
     else:
         lines.append("Сделок завершено: нет")
+    if unfilled:
+        lines.append(f"Сделок не состоялось: {len(unfilled)}")
+        for position in unfilled:
+            lines.append(
+                f"  {position.t_id} {position.buy_provider_id.value}→"
+                f"{position.sell_provider_id.value} {position.target_token.symbol} "
+                f"{money(position.input_amount)} — {_unfilled_reason(position)}"
+            )
     if open_now:
         lines.append(f"Открыто сейчас: {len(open_now)}")
         for position in open_now:
