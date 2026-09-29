@@ -44,7 +44,13 @@ networks:
     wrapped_native_address: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
     # Базовый токен круга этой сети: вход и выход цикла.
     base_token_address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
-    rpc_url: "https://polygon-bor-rpc.publicnode.com"
+    # Основным 29.09 по решению оператора стал drpc: publicnode в тот день
+    # отвечал «upstream overloaded» на eth_call, eth_gasPrice и
+    # eth_feeHistory, оставаясь при этом живым на eth_chainId — то есть
+    # выглядел исправным, а нужные вызовы отклонял. Обход это вытягивал,
+    # но каждый вызов начинался с неудачной попытки. publicnode оставлен
+    # последним в запасных: он вернётся в форму и снова будет полезен.
+    rpc_url: "https://polygon.drpc.org"
     # Запасные узлы. Публичные узлы отказывают — 18.09 основной узел
     # Arbitrum начал отвечать 403 на всё подряд, и подобрать квитанцию
     # уже отправленной покупки стало нечем. Проверены живыми запросами
@@ -65,10 +71,10 @@ networks:
     # polygon-rpc.com, ankr, blastapi, blockpi, nodies, llamarpc,
     # subquery, stackup, lava — проверено, не годятся.
     rpc_fallback_urls:
-      - "https://polygon.drpc.org"
       - "https://polygon.gateway.tenderly.co"
       - "https://137.rpc.thirdweb.com"
       - "https://1rpc.io/matic"
+      - "https://polygon-bor-rpc.publicnode.com"
     # Значок сети в уведомлении Telegram.
     emoji: "⛓️"
     enabled: true
