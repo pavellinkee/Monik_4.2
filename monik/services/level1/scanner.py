@@ -449,7 +449,7 @@ class Level1Scanner:
                 # поправки: применённую поправку пишет сама калибровка.
                 best_gas_cost=None if best is None else str(best.gas_cost),
                 best_quoted_gas_units=None if best is None else best.quoted_gas_units,
-                best_gas_price_wei=None if best is None else best.gas_price_wei,
+                best_quoted_gas_price_wei=(None if best is None else best.quoted_gas_price_wei),
                 best_volatile_net_roi=(
                     None if best_volatile is None else str(best_volatile.net_roi.value)
                 ),
@@ -596,7 +596,7 @@ def _best_combination(candidates: tuple[Candidate, ...]) -> BestCombination | No
         sell_provider=best.sell_quote.provider_id,
         gas_cost=None if result.costs is None else result.costs.gas_cost,
         quoted_gas_units=_quoted_units(best),
-        gas_price_wei=_quoted_price(best),
+        quoted_gas_price_wei=_quoted_price(best),
     )
 
 

@@ -17,16 +17,9 @@ from dataclasses import dataclass
 import pytest
 
 from monik.app.control import TradingSwitch
-from monik.app.lifecycle import (
-    _budget_allows,
-    _gas_price_task,
-    _gas_refresh_interval,
-    _search_allowed,
-    _trade_task,
-)
+from monik.app.lifecycle import _budget_allows, _search_allowed, _trade_task
 from monik.app.trade_buttons import sell_buttons
 from monik.domain.enums.modes import ScanMode
-from monik.domain.value_objects.identity import NetworkId
 from monik.services.observability import FakeClock
 from monik.services.trading.pending import FindingQueue
 from tests import factories as f
@@ -294,74 +287,3 @@ class TestTradeTaskIsSeparate:
         container = _TradeContainer(executor=None, findings=None, trading=None)
 
         await _trade_task(container)()  # type: ignore[arg-type]
-
-
-class _Networks:
-    """Включённые сети как их видит задача."""
-
-    def __init__(self, *network_ids: object) -> None:
-        self._network_ids = network_ids
-
-    def enabled(self) -> tuple[object, ...]:
-        return tuple(_Network(network_id) for network_id in self._network_ids)
-
-
-@dataclass
-class _Network:
-    network_id: object
-
-
-class _Gas:
-    """Оценщик газа, запоминающий, у каких сетей спросили цену."""
-
-    def __init__(self, *, known: bool = True) -> None:
-        self._known = known
-        self.refreshed: list[object] = []
-
-    async def refresh_price(self, network_id: object) -> object | None:
-        self.refreshed.append(network_id)
-        return object() if self._known else None
-
-
-@dataclass
-class _GasContainer:
-    networks: _Networks
-    gas: _Gas
-
-
-class TestGasPriceRefresh:
-    """Проход и исполнение должны считать по одной цене газа.
-
-    Проход не тратит на цену газа запросов и берёт её из памяти
-    источника. Пока память никто не обновлял, он опирался на цену из
-    котировки агрегатора, а она рассчитана на гарантированное
-    прохождение транзакции и завышена примерно в полтора раза: 29.09
-    проход считал круг по 447–458 гвей, а исполнение в ту же минуту — по
-    273 гвей от узла сети.
-    """
-
-    async def test_every_enabled_network_is_refreshed(self) -> None:
-        other = NetworkId("ethereum")
-        container = _GasContainer(networks=_Networks(f.POLYGON, other), gas=_Gas())
-
-        await _gas_price_task(container)()  # type: ignore[arg-type]
-
-        assert container.gas.refreshed == [f.POLYGON, other]
-
-    async def test_an_unknown_price_is_not_an_error(self) -> None:
-        """Узел молчит — проход останется на цене из котировки."""
-        container = _GasContainer(networks=_Networks(f.POLYGON), gas=_Gas(known=False))
-
-        await _gas_price_task(container)()  # type: ignore[arg-type]
-
-        assert container.gas.refreshed == [f.POLYGON]
-
-    def test_the_refresh_outpaces_the_freshness(self) -> None:
-        """Обновление вдвое чаще срока свежести: проход всегда находит своё."""
-        assert _gas_refresh_interval(60) == 30
-        assert _gas_refresh_interval(10) == 5
-
-    def test_the_refresh_is_never_faster_than_a_block(self) -> None:
-        """Ниже пяти секунд опрашивать узел бессмысленно."""
-        assert _gas_refresh_interval(4) == 5
-        assert _gas_refresh_interval(1) == 5

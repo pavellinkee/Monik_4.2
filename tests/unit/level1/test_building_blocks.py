@@ -21,6 +21,7 @@ from monik.services.level1 import (
     rank_groups,
 )
 from monik.services.level1.ranking import rank_candidates
+from monik.services.level1.scanner import _best_combination
 from tests import factories as f
 
 MAX_AGE = timedelta(seconds=30)
@@ -384,3 +385,53 @@ def test_search_modes_keep_the_order_they_had() -> None:
     ordered = rank_candidates(groups, by_profit=False)
 
     assert [c.buy_quote.input_amount.raw for c in ordered] == [50_000_000, 100_000_000]
+
+
+class TestRecordedGasPriceNamesItsSource:
+    """Цена газа в записи прохода — из котировки, а не из расчёта.
+
+    Стоимость круга проход считает по цене узла сети: та же величина
+    достаётся и исполнению. Рядом в записи лежит цена, которую назвал
+    агрегатор вместе с котировкой, — она рассчитана на гарантированное
+    прохождение транзакции и выше примерно в полтора раза. 29.09 разницу
+    между этими двумя числами приняли за расхождение между проходом и
+    исполнением, хотя расходились только два поля журнала. Имя поля
+    теперь говорит, что это за величина, а тест закрепляет смысл.
+    """
+
+    #: Замер 29.09: узел называл 273 гвей, котировка Uniswap — 447.
+    QUOTED = 447_000_000_000
+
+    def _candidate(self, gas_cost: str) -> Candidate:
+        base = candidate()
+        result = base.preliminary_result
+        assert result.costs is not None
+        return base.model_copy(
+            update={
+                "buy_quote": base.buy_quote.model_copy(
+                    update={"estimated_gas_price_wei": self.QUOTED}
+                ),
+                "preliminary_result": result.model_copy(
+                    update={
+                        "costs": result.costs.model_copy(update={"gas_cost": Decimal(gas_cost)})
+                    }
+                ),
+            }
+        )
+
+    def test_the_recorded_price_is_the_quoted_one(self) -> None:
+        best = _best_combination((self._candidate("0.0104"),))
+
+        assert best is not None
+        assert best.quoted_gas_price_wei == self.QUOTED
+
+    def test_the_recorded_cost_comes_from_the_calculation(self) -> None:
+        """Стоимость взята из расчёта и цене из котировки не подчиняется.
+
+        По 447 гвей круг обошёлся бы почти вдвое дороже; в записи стоит
+        то, что посчитано по цене узла.
+        """
+        best = _best_combination((self._candidate("0.0104"),))
+
+        assert best is not None
+        assert best.gas_cost == Decimal("0.0104")

@@ -73,7 +73,12 @@ class BestCombination(DomainModel):
     #: которые больше взять неоткуда.
     gas_cost: NonNegativeDecimal | None = None
     quoted_gas_units: int | None = Field(default=None, ge=0)
-    gas_price_wei: int | None = Field(default=None, ge=0)
+    #: Цена газа **из котировки**, а не та, по которой посчитана
+    #: стоимость: её называет узел сети, и в разбивке её нет.
+    #: Имя говорит об этом прямо — 29.09 разницу между двумя
+    #: величинами приняли за расхождение между проходом и
+    #: исполнением, хотя расходились только два журнала.
+    quoted_gas_price_wei: int | None = Field(default=None, ge=0)
 
 
 class ScanStatistics(DomainModel):
