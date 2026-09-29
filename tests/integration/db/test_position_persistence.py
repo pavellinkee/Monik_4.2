@@ -84,3 +84,39 @@ class TestRoundTrip:
         await repository.update(closed)
 
         assert await repository.get(opened.t_id) == closed
+
+
+class TestSellerCanChange:
+    """Продавец в записи — тот, кто продал, а не тот, кому поручили.
+
+    В ожидании выход достаётся аггрегатору, давшему лучшее предложение
+    (``the_main_rules.md``, правило 21), и покупали мы у одного, а продать
+    можем у другого. Пока поле было неизменяемым, в базе оставался
+    назначенный при покупке: 29.09 уведомление о завершении #T58 назвало
+    круг uniswap -> cow, а отчёт за промежуток, который читает базу, —
+    uniswap -> uniswap. Одна сделка, два разных круга в двух сообщениях.
+    """
+
+    async def test_a_changed_seller_reaches_the_record(self, database: Database) -> None:
+        await MigrationRunner(database).upgrade()
+        repository = SqlitePositionRepository(database)
+        opened = Position(
+            t_id=TId.from_sequence(9),
+            network_id=f.POLYGON,
+            status=PositionStatus.HOLDING,
+            base_token=f.USDT,
+            target_token=f.AAVE,
+            buy_provider_id=ProviderId.UNISWAP,
+            sell_provider_id=ProviderId.UNISWAP,
+            raw_input=50_000_000,
+            raw_acquired=49_968_534,
+            opened_at=f.NOW,
+        )
+        await repository.create(opened)
+
+        await repository.update(opened.model_copy(update={"sell_provider_id": ProviderId.COW}))
+
+        restored = await repository.get(opened.t_id)
+        assert restored is not None
+        assert restored.sell_provider_id is ProviderId.COW
+        assert restored.buy_provider_id is ProviderId.UNISWAP, "покупатель не меняется"

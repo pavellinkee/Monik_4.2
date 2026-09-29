@@ -44,6 +44,13 @@ _COLUMNS = (
 #: расход газа в поле выручки.
 _MUTABLE = (
     "status",
+    # Продавец меняется по ходу сделки: в ожидании выход достаётся тому,
+    # кто дал лучшее предложение (``the_main_rules.md``, правило 21).
+    # Пока поле было неизменяемым, в записи оставался назначенный при
+    # покупке, и 29.09 уведомление о завершении #T58 назвало круг
+    # uniswap -> cow (продала действительно книга CoW), а отчёт за
+    # промежуток, читающий базу, — uniswap -> uniswap.
+    "sell_provider_id",
     "raw_acquired",
     "raw_returned",
     "raw_target_before_buy",
@@ -130,6 +137,7 @@ class SqlitePositionRepository:
             f"UPDATE positions SET {_ASSIGNMENTS} WHERE t_id = ?",
             (
                 position.status.value,
+                position.sell_provider_id.value,
                 _raw(position.raw_acquired),
                 _raw(position.raw_returned),
                 _raw(position.raw_target_before_buy),
