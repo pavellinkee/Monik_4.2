@@ -294,3 +294,153 @@ class TestNetworkPriorityFee:
 
         assert price is not None
         assert price.priority_fee_wei == 0
+
+
+class _NodeWithMemory:
+    """Источник, помнящий последнюю цену, как это делает узел сети.
+
+    **Test implementation** (``CLAUDE.md`` §10): настоящий ходит в сеть, а
+    здесь важно только одно — запрос делает тот, кому это разрешено, а
+    проход читает уже известное.
+    """
+
+    requires_request = True
+
+    def __init__(self, clock: FakeClock, *, wei_per_gas: int, freshness_seconds: int) -> None:
+        self._clock = clock
+        self._wei_per_gas = wei_per_gas
+        self._freshness = timedelta(seconds=freshness_seconds)
+        self._known: GasPrice | None = None
+        self.calls = 0
+
+    async def gas_price(self, network_id: object) -> GasPrice | None:
+        self.calls += 1
+        now = self._clock.now()
+        self._known = GasPrice(
+            network_id=f.POLYGON,
+            wei_per_gas=self._wei_per_gas,
+            source="test-node",
+            observed_at=now,
+            expires_at=now + self._freshness,
+        )
+        return self._known
+
+    def cached_price(self, network_id: object) -> GasPrice | None:
+        if self._known is None or not self._known.is_fresh(self._clock.now()):
+            return None
+        return self._known
+
+
+class TestRefreshedPriceForTheScan:
+    """Одно решение о деньгах опирается на одну цену газа.
+
+    Проход не тратит на цену газа запросов и берёт её из памяти
+    источника, а если там пусто — из котировки агрегатора. Котировка
+    рассчитана на то, чтобы транзакция прошла наверняка, и завышает цену
+    примерно в полтора раза: 29.09 проход считал круг по 447–458 гвей, а
+    исполнение в ту же минуту — по 273 гвей от узла. Обновление памяти
+    отдельной задачей убирает этот разнобой.
+    """
+
+    #: Цена узла и завышенная цена из котировки того же дня.
+    NODE = 273_000_000_000
+    QUOTED = 447_000_000_000
+
+    @staticmethod
+    def _estimator(clock: FakeClock, node: _NodeWithMemory) -> GasEstimator:
+        return GasEstimator(
+            clock,
+            price_providers=(node,),
+            native_tokens=NATIVE_TOKENS,
+            prefer_quoted_price=True,
+        )
+
+    async def test_without_a_refresh_the_scan_falls_back_to_the_quote(self) -> None:
+        clock = FakeClock(f.NOW)
+        node = _NodeWithMemory(clock, wei_per_gas=self.NODE, freshness_seconds=60)
+
+        gas = await self._estimator(clock, node).estimate(
+            f.POLYGON,
+            gas_units=1000,
+            quoted_price_wei=self.QUOTED,
+            allow_remote_lookup=False,
+        )
+
+        assert gas.gas_price is not None
+        assert gas.gas_price.wei_per_gas == self.QUOTED
+        assert node.calls == 0, "проход к узлу не обращается"
+
+    async def test_after_a_refresh_the_scan_counts_by_the_network_price(self) -> None:
+        """Именно эту цену возьмёт исполнение, когда дойдёт до сделки."""
+        clock = FakeClock(f.NOW)
+        node = _NodeWithMemory(clock, wei_per_gas=self.NODE, freshness_seconds=60)
+        estimator = self._estimator(clock, node)
+
+        await estimator.refresh_price(f.POLYGON)
+        gas = await estimator.estimate(
+            f.POLYGON,
+            gas_units=1000,
+            quoted_price_wei=self.QUOTED,
+            allow_remote_lookup=False,
+        )
+
+        assert gas.gas_price is not None
+        assert gas.gas_price.wei_per_gas == self.NODE
+        assert node.calls == 1, "запрос сделало обновление, а не проход"
+
+    async def test_many_scans_cost_no_requests(self) -> None:
+        """Обновление одно, проходов между ними много."""
+        clock = FakeClock(f.NOW)
+        node = _NodeWithMemory(clock, wei_per_gas=self.NODE, freshness_seconds=60)
+        estimator = self._estimator(clock, node)
+        await estimator.refresh_price(f.POLYGON)
+
+        for _ in range(3):
+            clock.advance(timedelta(seconds=15))
+            gas = await estimator.estimate(
+                f.POLYGON,
+                gas_units=1000,
+                quoted_price_wei=self.QUOTED,
+                allow_remote_lookup=False,
+            )
+            assert gas.gas_price is not None
+            assert gas.gas_price.wei_per_gas == self.NODE
+
+        assert node.calls == 1
+
+    async def test_a_stale_price_does_not_pass_for_a_fresh_one(self) -> None:
+        """Устаревшее знание не выдаётся за текущее (``CLAUDE.md`` §12).
+
+        Проход возвращается к цене из котировки — она хуже, зато видно,
+        откуда взята.
+        """
+        clock = FakeClock(f.NOW)
+        node = _NodeWithMemory(clock, wei_per_gas=self.NODE, freshness_seconds=60)
+        estimator = self._estimator(clock, node)
+        await estimator.refresh_price(f.POLYGON)
+
+        clock.advance(timedelta(seconds=61))
+        gas = await estimator.estimate(
+            f.POLYGON,
+            gas_units=1000,
+            quoted_price_wei=self.QUOTED,
+            allow_remote_lookup=False,
+        )
+
+        assert gas.gas_price is not None
+        assert gas.gas_price.wei_per_gas == self.QUOTED
+        assert gas.gas_price.source == "quote"
+
+    async def test_a_silent_node_is_not_invented(self) -> None:
+        """Отказ узла оставляет цену неизвестной, а не нулевой."""
+        clock = FakeClock(f.NOW)
+        silent = _CountingProvider(wei_per_gas=None)
+
+        estimator = GasEstimator(
+            clock,
+            price_providers=(silent,),
+            native_tokens=NATIVE_TOKENS,
+            prefer_quoted_price=True,
+        )
+
+        assert await estimator.refresh_price(f.POLYGON) is None

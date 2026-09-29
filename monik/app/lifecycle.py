@@ -67,6 +67,7 @@ from monik.services.updates import AptPendingUpdates, UpdateWatcher
 __all__ = [
     "TASK_CAPABILITY_LOAD",
     "TASK_TOKEN_CHECK",
+    "TASK_GAS_PRICE",
     "scan_task_name",
     "TASK_NOTIFICATIONS",
     "TASK_POSITIONS",
@@ -113,6 +114,7 @@ TASK_TRADE_REPORT = "trade_report"
 TASK_TELEGRAM_COMMANDS = "telegram_commands"
 TASK_CAPABILITY_LOAD = "capability_load"
 TASK_TOKEN_CHECK = "token_check"
+TASK_GAS_PRICE = "gas_price_refresh"
 TASK_SYSTEM_HEALTH = "system_health_notifications"
 TASK_BACKUP = "backup"
 TASK_SYSTEM_UPDATES = "system_updates"
@@ -460,6 +462,22 @@ def build_application(
         default=_DEFAULT_SCHEDULES[TASK_TOKEN_CHECK],
         priority=RequestPriority.MAINTENANCE,
     )
+    # Цена газа обновляется отдельной задачей обслуживания. Проход её не
+    # спрашивает (``09_PROFIT_CALCULATOR.md`` §16: этап поиска не тратит
+    # на цену газа запросов) и берёт известное из памяти источника.
+    # Обновлять память должен кто-то один, иначе проход считает по цене
+    # из котировки, а исполнение — по цене узла, и одно решение о
+    # деньгах опирается на две разные цены.
+    registry.register(
+        TASK_GAS_PRICE,
+        _gas_price_task(container),
+        config=config.scheduler,
+        default=TaskScheduleConfig(
+            mode=TaskMode.INTERVAL,
+            interval_seconds=_gas_refresh_interval(config.gas.freshness_seconds),
+        ),
+        priority=RequestPriority.MAINTENANCE,
+    )
     # По задаче на включённый режим: у каждого свой темп и своя планка,
     # поэтому и расписание у каждого своё. Период берётся из настройки
     # режима и в расписании не дублируется — иначе задача, не упомянутая
@@ -617,6 +635,38 @@ async def create_application(
         loaded, database=database, clock=clock, metrics=metrics, adapters=adapters
     )
     return application, database
+
+
+def _gas_refresh_interval(freshness_seconds: int) -> int:
+    """Как часто обновлять цену газа при заданном сроке её свежести.
+
+    Половина срока: к моменту следующего прохода известное всегда свежо,
+    а лишних обращений к узлу не возникает. Меньше пяти секунд не
+    ставится — узел не быстрее блока.
+    """
+    return max(5, freshness_seconds // 2)
+
+
+def _gas_price_task(container: Container) -> TaskHandler:
+    """Обновление цены газа включённых сетей.
+
+    Стоит одного-двух обращений к узлу сети раз в полсрока свежести.
+    Узел — не агрегатор, его квоту это не расходует, зато проход и
+    исполнение начинают считать стоимость круга по одной цене.
+    """
+
+    async def run() -> None:
+        for network in container.networks.enabled():
+            price = await container.gas.refresh_price(network.network_id)
+            if price is None:
+                # Незнание не подменяется нулём (``CLAUDE.md`` §12):
+                # проход останется на цене из котировки, и это видно.
+                _LOGGER.info(
+                    "gas price is unknown for now",
+                    extra=log_fields(network=str(network.network_id)),
+                )
+
+    return run
 
 
 def _token_check_task(container: Container) -> TaskHandler:
