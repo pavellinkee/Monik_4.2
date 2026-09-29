@@ -49,8 +49,26 @@ networks:
     # Arbitrum начал отвечать 403 на всё подряд, и подобрать квитанцию
     # уже отправленной покупки стало нечем. Проверены живыми запросами
     # в тот же день.
+    #
+    # Список расширен 29.09 по решению оператора: у #T58 основной узел
+    # отвечал «upstream overloaded» на eth_call, eth_gasPrice и
+    # eth_feeHistory, выход задержался на восемь минут, и лучшее
+    # предложение за это время упало с +0,157 до +0,037 USDT. Одного
+    # запасного узла на такой случай мало.
+    #
+    # Все три добавленных проверены живыми запросами 29.09: отвечают на
+    # eth_call, eth_gasPrice, eth_feeHistory, eth_getTransactionReceipt,
+    # eth_estimateGas и eth_sendRawTransaction, стоят на высоте цепи и
+    # ключа доступа не требуют. Порядок — по задержке: tenderly ~107 мс,
+    # thirdweb ~340 мс, 1rpc ~500 мс. Большинство прочих публичных узлов
+    # в тот же день оказались закрыты или переведены на ключ:
+    # polygon-rpc.com, ankr, blastapi, blockpi, nodies, llamarpc,
+    # subquery, stackup, lava — проверено, не годятся.
     rpc_fallback_urls:
       - "https://polygon.drpc.org"
+      - "https://polygon.gateway.tenderly.co"
+      - "https://137.rpc.thirdweb.com"
+      - "https://1rpc.io/matic"
     # Значок сети в уведомлении Telegram.
     emoji: "⛓️"
     enabled: true
